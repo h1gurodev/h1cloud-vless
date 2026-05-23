@@ -28,13 +28,14 @@ cd $HOME/xray
 
 if [ ! -f "./xray" ]; then
     echo "=> Скачивание ядра Xray..."
-    wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+    # Используем curl вместо wget, так как wget вырезан из системы
+    curl -sL -o xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
     
     if command -v unzip &> /dev/null; then unzip -q xray.zip
     elif command -v python3 &> /dev/null; then python3 -m zipfile -e xray.zip .
     elif command -v busybox &> /dev/null; then busybox unzip -q xray.zip
     else echo "❌ Ошибка: Не могу распаковать архив."; exit 1; fi
-    rm xray.zip
+    rm -f xray.zip
 fi
 
 # Генерация данных
