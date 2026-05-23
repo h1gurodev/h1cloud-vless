@@ -2,7 +2,7 @@
 
 # ==========================================
 # БЕЛЫЙ СПИСОК IP
-ALLOWED_IPS=("185.218.137.132")
+ALLOWED_IPS=("185.218.137.132" "ТВОЙ_ВТОРОЙ_IP")
 # ==========================================
 
 # Проверка IP
@@ -24,7 +24,6 @@ fi
 # Берем домен из аргумента команды
 DOMAIN=$1
 
-# Если домен не передали, ругаемся и показываем, как надо
 if [ -z "$DOMAIN" ]; then
     clear
     echo "❌ Ошибка: Вы не указали домен при запуске!"
@@ -45,18 +44,38 @@ echo "================================================================"
 echo ""
 echo "=> Используем домен: $DOMAIN"
 
+# Переходим в рабочую папку
+mkdir -p $HOME/xray
+cd $HOME/xray
+
+# СКАЧИВАНИЕ И РАСПАКОВКА XRAY
+if [ ! -f "./xray" ]; then
+    echo "=> Ядро Xray не найдено. Начинаю загрузку с GitHub..."
+    wget -qO xray.zip https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip
+    
+    echo "=> Распаковка архива..."
+    # Так как команды unzip на сервере нет, используем Python или Busybox
+    if command -v unzip &> /dev/null; then
+        unzip -q xray.zip
+    elif command -v python3 &> /dev/null; then
+        python3 -m zipfile -e xray.zip .
+    elif command -v busybox &> /dev/null; then
+        busybox unzip -q xray.zip
+    else
+        echo "❌ Ошибка: Не могу распаковать архив. На сервере нет утилит unzip или python3."
+        exit 1
+    fi
+    # Удаляем мусор
+    rm xray.zip
+else
+    echo "=> Ядро Xray уже скачано, пропускаем загрузку."
+fi
+
 # Порт сервера
 PORT=${SERVER_PORT:-25587}
 UUID=$(cat /proc/sys/kernel/random/uuid)
 
-# Ищем папку xray и переходим в нее
-if [ -d "$HOME/xray" ]; then
-    cd "$HOME/xray"
-elif [ -d "./xray" ]; then
-    cd "./xray"
-fi
-
-echo "=> Создаем config.json в папке $(pwd)..."
+echo "=> Создаем config.json..."
 
 cat <<EOF > config.json
 {
