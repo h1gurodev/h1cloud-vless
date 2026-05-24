@@ -19,6 +19,7 @@ API_TOKEN_FILE="$DATA_DIR/api_token.txt"
 API_PORT_FILE="$DATA_DIR/api_port.txt"
 API_PID_FILE="$DATA_DIR/api.pid"
 REALITY_PRIVATE_KEY_FILE="$DATA_DIR/reality_private_key.txt"
+PUBLIC_IP_FILE="$DATA_DIR/public_ip.txt"
 REALITY_PUBLIC_KEY_FILE="$DATA_DIR/reality_public_key.txt"
 REALITY_SHORT_ID_FILE="$DATA_DIR/reality_short_id.txt"
 REALITY_SNI_FILE="$DATA_DIR/reality_sni.txt"
@@ -145,6 +146,49 @@ read_domain() {
     fi
 
     echo "localhost"
+    return 0
+}
+
+# Возвращает реальный IP сервера (а не домен Pterodactyl Domains).
+# На Pterodactyl env SERVER_IP обычно содержит IP аллокации — но это часто
+# 0.0.0.0 (внутри контейнера), поэтому пробуем по очереди:
+#   1. env PUBLIC_IP / SERVER_IP (если он валидный, не 0.0.0.0/127.x)
+#   2. кэш в public_ip.txt
+#   3. curl на ifconfig.me / api.ipify.org (один раз, потом сохранить в кэш)
+#   4. fallback — домен из domain.txt
+read_public_ip() {
+    local CANDIDATE=""
+
+    if [ -n "${PUBLIC_IP:-}" ]; then
+        CANDIDATE="$PUBLIC_IP"
+    elif [ -n "${SERVER_IP:-}" ]; then
+        CANDIDATE="$SERVER_IP"
+    fi
+
+    case "$CANDIDATE" in
+        ""|0.0.0.0|127.*|::|::1) CANDIDATE="" ;;
+    esac
+
+    if [ -n "$CANDIDATE" ]; then
+        echo "$CANDIDATE"
+        return 0
+    fi
+
+    if [ -f "$PUBLIC_IP_FILE" ] && [ -s "$PUBLIC_IP_FILE" ]; then
+        head -n 1 "$PUBLIC_IP_FILE"
+        return 0
+    fi
+
+    for URL in "https://api.ipify.org" "https://ifconfig.me/ip" "https://ipv4.icanhazip.com"; do
+        CANDIDATE="$(curl -fsS --max-time 4 "$URL" 2>/dev/null | tr -d '[:space:]')"
+        if [ -n "$CANDIDATE" ]; then
+            echo "$CANDIDATE" > "$PUBLIC_IP_FILE"
+            echo "$CANDIDATE"
+            return 0
+        fi
+    done
+
+    read_domain
     return 0
 }
 
@@ -1321,9 +1365,17 @@ stop_api_process() {
 }
 
 start_api_process() {
-    PORT_VALUE="$1"
+    # ВСЕ переменные функции — local, иначе они конфликтуют с такими же
+    # именами в start_sub_process/restart_api_if_running/keep_api_alive
+    # (бывало, что api при старте печатал чужой порт).
+    local API_BIND_PORT="$1"
+    local TOKEN LOCAL_PORT PUBLIC_PORT_VALUE
+    local REALITY_LOCAL_PORT_VALUE REALITY_PUBLIC_PORT_VALUE
+    local REALITY_SNI_VALUE REALITY_DEST_VALUE
+    local REALITY_PRIVATE_KEY_VALUE REALITY_PUBLIC_KEY_VALUE REALITY_SHORT_ID_VALUE
+    local SUB_PORT_VALUE SUB_TOKEN_VALUE RUNNING_PORT
 
-    if ! validate_port "$PORT_VALUE"; then
+    if ! validate_port "$API_BIND_PORT"; then
         echo "usage: vpn api PORT"
         echo "port must be 1-65535"
         return 0
@@ -1354,7 +1406,7 @@ start_api_process() {
         SUB_TOKEN_VALUE="$(get_sub_token)"
     fi
 
-    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$PORT_VALUE" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" <<'PY' &
 import datetime
 import json
 import os
@@ -1984,16 +2036,16 @@ PY
 
     API_PID="$!"
     echo "$API_PID" > "$API_PID_FILE"
-    echo "$PORT_VALUE" > "$API_PORT_FILE"
+    echo "$API_BIND_PORT" > "$API_PORT_FILE"
 
     sleep 1
 
     if kill -0 "$API_PID" >/dev/null 2>&1; then
-        echo "api started: 0.0.0.0:$PORT_VALUE"
-        echo "url: http://$(read_domain):$PORT_VALUE"
+        echo "api started: 0.0.0.0:$API_BIND_PORT"
+        echo "url: http://$(read_public_ip):$API_BIND_PORT"
         echo "token: $TOKEN"
         echo "auth: Authorization: Bearer $TOKEN"
-        log_action "api_start" "0.0.0.0:$PORT_VALUE pid=$API_PID"
+        log_action "api_start" "0.0.0.0:$API_BIND_PORT pid=$API_PID"
         return 0
     fi
 
@@ -2004,7 +2056,8 @@ PY
 }
 
 cmd_api() {
-    ACTION="${1:-}"
+    local ACTION="${1:-}"
+    local RESTART_PORT
 
     if validate_port "$ACTION"; then
         start_api_process "$ACTION"
@@ -2020,12 +2073,12 @@ cmd_api() {
             echo "api stopped"
             ;;
         restart)
-            PORT_VALUE="${2:-}"
-            if [ -z "$PORT_VALUE" ] && [ -f "$API_PORT_FILE" ]; then
-                PORT_VALUE="$(cat "$API_PORT_FILE" 2>/dev/null)"
+            RESTART_PORT="${2:-}"
+            if [ -z "$RESTART_PORT" ] && [ -f "$API_PORT_FILE" ]; then
+                RESTART_PORT="$(cat "$API_PORT_FILE" 2>/dev/null)"
             fi
             stop_api_process keep
-            start_api_process "$PORT_VALUE"
+            start_api_process "$RESTART_PORT"
             ;;
         status)
             if api_is_running; then
@@ -2120,9 +2173,10 @@ stop_sub_process() {
 }
 
 start_sub_process() {
-    PORT_VALUE="$1"
+    local SUB_BIND_PORT="$1"
+    local TOKEN WS_PUBLIC_PORT_VALUE RUNNING_PORT
 
-    if ! validate_port "$PORT_VALUE"; then
+    if ! validate_port "$SUB_BIND_PORT"; then
         echo "usage: vpn sub PORT"
         echo "port must be 1-65535"
         return 0
@@ -2138,9 +2192,9 @@ start_sub_process() {
     ensure_reality_files >/dev/null 2>&1
     TOKEN="$(get_sub_token)"
     WS_PUBLIC_PORT_VALUE="$(get_public_port)"
-    echo "$PORT_VALUE" > "$SUB_PORT_FILE"
+    echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
-    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$PORT_VALUE" "$WS_PUBLIC_PORT_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" <<'PY' &
 import base64
 import datetime
 import json
@@ -2339,10 +2393,10 @@ PY
     sleep 1
 
     if kill -0 "$SUB_PID" >/dev/null 2>&1; then
-        echo "subscription started: 0.0.0.0:$PORT_VALUE"
+        echo "subscription started: 0.0.0.0:$SUB_BIND_PORT"
         echo "token: $TOKEN"
-        echo "url example: http://$(read_domain):$PORT_VALUE/sub/NAME?token=$TOKEN"
-        log_action "sub_start" "0.0.0.0:$PORT_VALUE pid=$SUB_PID"
+        echo "url example: http://$(read_public_ip):$SUB_BIND_PORT/sub/NAME?token=$TOKEN"
+        log_action "sub_start" "0.0.0.0:$SUB_BIND_PORT pid=$SUB_PID"
         sync_keys_file >/dev/null 2>&1
         restart_api_if_running
         return 0
@@ -2355,7 +2409,8 @@ PY
 }
 
 cmd_sub() {
-    ACTION="${1:-}"
+    local ACTION="${1:-}"
+    local RESTART_PORT
 
     if validate_port "$ACTION"; then
         start_sub_process "$ACTION"
@@ -2373,19 +2428,19 @@ cmd_sub() {
             echo "subscription stopped"
             ;;
         restart)
-            PORT_VALUE="${2:-}"
-            if [ -z "$PORT_VALUE" ] && [ -f "$SUB_PORT_FILE" ]; then
-                PORT_VALUE="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
+            RESTART_PORT="${2:-}"
+            if [ -z "$RESTART_PORT" ] && [ -f "$SUB_PORT_FILE" ]; then
+                RESTART_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
             fi
             stop_sub_process keep
-            start_sub_process "$PORT_VALUE"
+            start_sub_process "$RESTART_PORT"
             ;;
         status)
             if sub_is_running; then
                 RUNNING_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
                 echo "subscription running: 0.0.0.0:${RUNNING_PORT:-unknown}"
                 echo "pid: $SUB_PID"
-                echo "url example: http://$(read_domain):${RUNNING_PORT:-PORT}/sub/NAME?token=$(get_sub_token)"
+                echo "url example: http://$(read_public_ip):${RUNNING_PORT:-PORT}/sub/NAME?token=$(get_sub_token)"
             else
                 echo "subscription stopped"
             fi
@@ -2445,12 +2500,13 @@ sync_external_user_changes() {
 }
 
 keep_api_alive() {
+    local SAVED_PORT
     if [ -n "$API_PID" ] && ! kill -0 "$API_PID" >/dev/null 2>&1; then
-        PORT_VALUE="$(cat "$API_PORT_FILE" 2>/dev/null)"
+        SAVED_PORT="$(cat "$API_PORT_FILE" 2>/dev/null)"
         API_PID=""
-        if validate_port "$PORT_VALUE"; then
+        if validate_port "$SAVED_PORT"; then
             echo "api stopped, trying to restart..."
-            start_api_process "$PORT_VALUE" >/dev/null 2>&1
+            start_api_process "$SAVED_PORT" >/dev/null 2>&1
         fi
     fi
 
@@ -2458,12 +2514,13 @@ keep_api_alive() {
 }
 
 keep_sub_alive() {
+    local SAVED_PORT
     if [ -n "$SUB_PID" ] && ! kill -0 "$SUB_PID" >/dev/null 2>&1; then
-        PORT_VALUE="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
+        SAVED_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
         SUB_PID=""
-        if validate_port "$PORT_VALUE"; then
+        if validate_port "$SAVED_PORT"; then
             echo "subscription stopped, trying to restart..."
-            start_sub_process "$PORT_VALUE" >/dev/null 2>&1
+            start_sub_process "$SAVED_PORT" >/dev/null 2>&1
         fi
     fi
 
@@ -2471,22 +2528,24 @@ keep_sub_alive() {
 }
 
 restart_api_if_running() {
+    local SAVED_PORT
     if api_is_running; then
-        PORT_VALUE="$(cat "$API_PORT_FILE" 2>/dev/null)"
+        SAVED_PORT="$(cat "$API_PORT_FILE" 2>/dev/null)"
         stop_api_process keep
-        if validate_port "$PORT_VALUE"; then
-            start_api_process "$PORT_VALUE" >/dev/null 2>&1
+        if validate_port "$SAVED_PORT"; then
+            start_api_process "$SAVED_PORT" >/dev/null 2>&1
         fi
     fi
     return 0
 }
 
 restart_sub_if_running() {
+    local SAVED_PORT
     if sub_is_running; then
-        PORT_VALUE="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
+        SAVED_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
         stop_sub_process keep
-        if validate_port "$PORT_VALUE"; then
-            start_sub_process "$PORT_VALUE" >/dev/null 2>&1
+        if validate_port "$SAVED_PORT"; then
+            start_sub_process "$SAVED_PORT" >/dev/null 2>&1
         fi
     fi
     return 0
