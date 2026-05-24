@@ -6,10 +6,10 @@ DATA_DIR="."
 USERS_FILE="$DATA_DIR/users.json"
 DOMAIN_FILE="$DATA_DIR/domain.txt"
 CONFIG_FILE="$DATA_DIR/config.json"
-UUID_FILE="$DATA_DIR/server_uuid.txt"
 KEY_FILE="$DATA_DIR/key.txt"
 XRAY_BIN="$DATA_DIR/xray"
 XRAY_PID=""
+CHECK_INTERVAL=300
 
 need_cmd() {
     if ! command -v "$1" >/dev/null 2>&1; then
@@ -47,7 +47,13 @@ get_domain() {
         return
     fi
 
-    echo "Enter domain connected in Pterodactyl Domains:"
+    if [ -n "${DOMAIN:-}" ]; then
+        echo "$DOMAIN" > "$DOMAIN_FILE"
+        cat "$DOMAIN_FILE"
+        return
+    fi
+
+    echo "Enter domain connected in Pterodactyl Domains:" >&2
     read -r DOMAIN
 
     if [ -z "$DOMAIN" ]; then
@@ -56,11 +62,15 @@ get_domain() {
     fi
 
     echo "$DOMAIN" > "$DOMAIN_FILE"
-    echo "$DOMAIN"
+    cat "$DOMAIN_FILE"
 }
 
 get_port() {
     echo "${SERVER_PORT:-25565}"
+}
+
+get_public_port() {
+    echo "${PUBLIC_PORT:-443}"
 }
 
 make_uuid() {
@@ -71,6 +81,21 @@ make_uuid() {
     fi
 }
 
+validate_name() {
+    NAME="$1"
+    if [ -z "$NAME" ]; then
+        return 1
+    fi
+
+    case "$NAME" in
+        *[!a-zA-Z0-9._-]*)
+            return 1
+            ;;
+    esac
+
+    return 0
+}
+
 prune_expired() {
     python3 - "$USERS_FILE" <<'PY'
 import json, sys, time
@@ -78,8 +103,11 @@ import json, sys, time
 path = sys.argv[1]
 now = int(time.time())
 
-with open(path, "r", encoding="utf-8") as f:
-    users = json.load(f)
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        users = json.load(f)
+except Exception:
+    users = []
 
 active = []
 removed = []
@@ -95,7 +123,7 @@ with open(path, "w", encoding="utf-8") as f:
     json.dump(active, f, ensure_ascii=False, indent=2)
 
 if removed:
-    print("expired users removed: " + ", ".join removed)
+    print("expired users removed: " + ", ".join(removed))
 PY
 }
 
@@ -111,8 +139,11 @@ users_file = sys.argv[1]
 config_file = sys.argv[2]
 port = int(sys.argv[3])
 
-with open(users_file, "r", encoding="utf-8") as f:
-    users = json.load(f)
+try:
+    with open(users_file, "r", encoding="utf-8") as f:
+        users = json.load(f)
+except Exception:
+    users = []
 
 clients = []
 
@@ -157,14 +188,22 @@ PY
 
 make_link() {
     NAME="$1"
-    DOMAIN="$(get_domain)"
 
-    python3 - "$USERS_FILE" "$NAME" "$DOMAIN" <<'PY'
+    if ! validate_name "$NAME"; then
+        echo "bad user name. use only: a-z A-Z 0-9 . _ -"
+        return 1
+    fi
+
+    PUBLIC_DOMAIN="$(get_domain)"
+    PUBLIC_PORT_VALUE="$(get_public_port)"
+
+    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$PUBLIC_PORT_VALUE" <<'PY'
 import json, sys
 
 users_file = sys.argv[1]
 name = sys.argv[2]
 domain = sys.argv[3]
+port = sys.argv[4]
 
 with open(users_file, "r", encoding="utf-8") as f:
     users = json.load(f)
@@ -172,7 +211,7 @@ with open(users_file, "r", encoding="utf-8") as f:
 for u in users:
     if u["name"] == name:
         uuid = u["uuid"]
-        print(f"vless://{uuid}@{domain}:443?type=ws&security=tls&sni={domain}&host={domain}&path=%2Fxray&encryption=none#{name}")
+        print(f"vless://{uuid}@{domain}:{port}?type=ws&security=tls&sni={domain}&host={domain}&path=%2Fxray&encryption=none#{name}")
         sys.exit(0)
 
 print("user not found")
@@ -213,6 +252,7 @@ cmd_help() {
     echo "vpn link test"
     echo "vpn renew test 15"
     echo "vpn del test"
+    echo "vpn domain vpn.example.com"
     echo "========================================"
 }
 
@@ -220,7 +260,14 @@ cmd_add() {
     NAME="$1"
     DAYS="$2"
 
-    if [ -z "$NAME" ] || [ -z "$DAYS" ]; then
+    if ! validate_name "$NAME"; then
+        echo "bad user name. use only: a-z A-Z 0-9 . _ -"
+        echo "usage: vpn add NAME DAYS"
+        return
+    fi
+
+    if ! echo "$DAYS" | grep -Eq '^[0-9]+$'; then
+        echo "days must be number"
         echo "usage: vpn add NAME DAYS"
         return
     fi
@@ -268,7 +315,7 @@ PY
 cmd_del() {
     NAME="$1"
 
-    if [ -z "$NAME" ]; then
+    if ! validate_name "$NAME"; then
         echo "usage: vpn del NAME"
         return
     fi
@@ -315,9 +362,11 @@ if not users:
 
 for u in users:
     exp = int(u["expires_at"])
-    left = max(0, int((exp - now) / 86400))
+    seconds_left = max(0, exp - now)
+    days_left = seconds_left // 86400
+    hours_left = (seconds_left % 86400) // 3600
     date = datetime.datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M")
-    print(f"{u['name']} | uuid: {u['uuid']} | expires: {date} | left: {left} days")
+    print(f"{u['name']} | uuid: {u['uuid']} | expires: {date} | left: {days_left}d {hours_left}h")
 PY
 }
 
@@ -325,7 +374,13 @@ cmd_renew() {
     NAME="$1"
     DAYS="$2"
 
-    if [ -z "$NAME" ] || [ -z "$DAYS" ]; then
+    if ! validate_name "$NAME"; then
+        echo "usage: vpn renew NAME DAYS"
+        return
+    fi
+
+    if ! echo "$DAYS" | grep -Eq '^[0-9]+$'; then
+        echo "days must be number"
         echo "usage: vpn renew NAME DAYS"
         return
     fi
@@ -363,27 +418,26 @@ PY
 }
 
 cmd_domain() {
-    DOMAIN="$1"
+    NEW_DOMAIN="$1"
 
-    if [ -z "$DOMAIN" ]; then
+    if [ -z "$NEW_DOMAIN" ]; then
         echo "usage: vpn domain DOMAIN"
         return
     fi
 
-    echo "$DOMAIN" > "$DOMAIN_FILE"
-    echo "domain saved: $DOMAIN"
+    echo "$NEW_DOMAIN" > "$DOMAIN_FILE"
+    echo "domain saved: $NEW_DOMAIN"
 
-    if [ -s "$USERS_FILE" ]; then
-        FIRST_USER="$(python3 - "$USERS_FILE" <<'PY'
+    FIRST_USER="$(python3 - "$USERS_FILE" <<'PY'
 import json, sys
 with open(sys.argv[1], "r", encoding="utf-8") as f:
     users = json.load(f)
 print(users[0]["name"] if users else "")
 PY
 )"
-        if [ -n "$FIRST_USER" ]; then
-            make_link "$FIRST_USER" > "$KEY_FILE" || true
-        fi
+
+    if [ -n "$FIRST_USER" ]; then
+        make_link "$FIRST_USER" > "$KEY_FILE" || true
     fi
 }
 
@@ -392,31 +446,31 @@ handle_cmd() {
 
     set -- $LINE
 
-    if [ "$1" = "vpn" ]; then
+    if [ "${1:-}" = "vpn" ]; then
         shift
     fi
 
-    case "$1" in
+    case "${1:-}" in
         help|"")
             cmd_help
             ;;
         add)
-            cmd_add "$2" "$3"
+            cmd_add "${2:-}" "${3:-}"
             ;;
         del|delete|remove)
-            cmd_del "$2"
+            cmd_del "${2:-}"
             ;;
         list)
             cmd_list
             ;;
         link)
-            make_link "$2"
+            make_link "${2:-}"
             ;;
         renew)
-            cmd_renew "$2" "$3"
+            cmd_renew "${2:-}" "${3:-}"
             ;;
         domain)
-            cmd_domain "$2"
+            cmd_domain "${2:-}"
             ;;
         restart)
             restart_xray
@@ -429,23 +483,21 @@ handle_cmd() {
             exit 0
             ;;
         *)
-            echo "unknown command: $1"
+            echo "unknown command: ${1:-}"
             echo "type: vpn help"
             ;;
     esac
 }
 
-auto_prune_loop() {
-    while true; do
-        sleep 300
-        BEFORE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
-        prune_expired >/dev/null 2>&1 || true
-        AFTER="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+check_expired_loop_tick() {
+    BEFORE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    prune_expired >/dev/null 2>&1 || true
+    AFTER="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
 
-        if [ "$BEFORE" != "$AFTER" ]; then
-            restart_xray >/dev/null 2>&1 || true
-        fi
-    done
+    if [ "$BEFORE" != "$AFTER" ]; then
+        restart_xray >/dev/null 2>&1 || true
+        echo "expired users cleaned"
+    fi
 }
 
 start_server() {
@@ -457,7 +509,7 @@ start_server() {
     echo "h1cloud vless is ready"
     echo "local port: $(get_port)"
     echo "domain: $(cat "$DOMAIN_FILE")"
-    echo "public port: 443"
+    echo "public port: $(get_public_port)"
     echo "type: vpn help"
     echo "========================================"
     echo ""
@@ -469,20 +521,31 @@ start_server() {
     "$XRAY_BIN" run -config "$CONFIG_FILE" &
     XRAY_PID="$!"
 
-    auto_prune_loop &
-    PRUNE_PID="$!"
+    LAST_CHECK=0
 
-    while IFS= read -r LINE; do
-        handle_cmd "$LINE"
+    while true; do
+        if IFS= read -r -t 5 LINE; then
+            handle_cmd "$LINE"
+        fi
+
+        NOW="$(date +%s)"
+        if [ $((NOW - LAST_CHECK)) -ge "$CHECK_INTERVAL" ]; then
+            check_expired_loop_tick
+            LAST_CHECK="$NOW"
+        fi
+
+        if ! kill -0 "$XRAY_PID" >/dev/null 2>&1; then
+            echo "xray stopped"
+            exit 1
+        fi
     done
-
-    kill "$XRAY_PID" >/dev/null 2>&1 || true
-    kill "$PRUNE_PID" >/dev/null 2>&1 || true
 }
 
-if [ "$1" = "vpn" ]; then
+if [ "${1:-}" = "vpn" ]; then
     shift
     init_files
+    get_domain >/dev/null
+    build_config
     handle_cmd "vpn $*"
 else
     start_server
