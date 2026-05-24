@@ -312,7 +312,10 @@ get_api_token() {
     fi
 
     TOKEN="$(make_uuid)$(make_uuid)"
-    TOKEN="$(echo "$TOKEN" | tr -d '-[:space:]')"
+    # ВАЖНО: `-` должен быть в КОНЦЕ списка, иначе GNU tr примет его за флаг
+    # и упадёт с "tr: invalid option -- '['" — токен станет пустым,
+    # и в файле окажется обычный unix timestamp вместо нормального ключа.
+    TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]-')"
 
     if [ -z "$TOKEN" ]; then
         TOKEN="$(date +%s)"
@@ -331,7 +334,7 @@ get_sub_token() {
     fi
 
     TOKEN="$(make_uuid)$(make_uuid)"
-    TOKEN="$(echo "$TOKEN" | tr -d '-[:space:]')"
+    TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]-')"
 
     if [ -z "$TOKEN" ]; then
         TOKEN="$(date +%s)"
@@ -1953,9 +1956,29 @@ class Handler(BaseHTTPRequestHandler):
 class ReuseServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
+    def server_bind(self):
+        import socket
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        super().server_bind()
+
 
 log_action("api_start", f"0.0.0.0:{API_PORT}")
-server = ReuseServer(("0.0.0.0", API_PORT), Handler)
+try:
+    server = ReuseServer(("0.0.0.0", API_PORT), Handler)
+except OSError as exc:
+    if exc.errno == 98:
+        sys.stderr.write(
+            f"port {API_PORT} is already in use.\n"
+            "on Pterodactyl: используй порт, который реально выделен этому серверу\n"
+            "(Configuration -> Allocations в панели). docker-proxy от wings уже сидит\n"
+            "на не-выделенных портах внутри netns, поэтому bind() падает.\n"
+        )
+    else:
+        sys.stderr.write(f"api bind failed on port {API_PORT}: {exc}\n")
+    sys.exit(1)
 server.serve_forever()
 PY
 
@@ -2287,8 +2310,26 @@ class Handler(BaseHTTPRequestHandler):
 class ReuseServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
+    def server_bind(self):
+        import socket
+        try:
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+        except (AttributeError, OSError):
+            pass
+        super().server_bind()
 
-server = ReuseServer(("0.0.0.0", SUB_PORT), Handler)
+
+try:
+    server = ReuseServer(("0.0.0.0", SUB_PORT), Handler)
+except OSError as exc:
+    if exc.errno == 98:
+        sys.stderr.write(
+            f"port {SUB_PORT} is already in use.\n"
+            "on Pterodactyl используй только порт, который выделен серверу в панели.\n"
+        )
+    else:
+        sys.stderr.write(f"sub bind failed on port {SUB_PORT}: {exc}\n")
+    sys.exit(1)
 server.serve_forever()
 PY
 
@@ -2600,9 +2641,9 @@ start_server() {
     echo "type: vpn help"
     print_line
     blank
-    echo "h1cloud.su - лучший хостинг"
-    echo "t.me/h1cloudbot"
-    echo "Программист - h1guro.ovh"
+    echo "https://h1cloud.su - лучший хостинг"
+    echo "https://t.me/h1cloudbot"
+    echo "Программист - https://h1guro.ovh"
     print_line
 
     start_xray_process
