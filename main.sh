@@ -394,10 +394,15 @@ ensure_reality_files() {
     # Старый формат: "Private key:" / "Public key:"
     # Новый формат (xray v25.3.6+): "PrivateKey:" / "Password:" (Password = публичный ключ)
     # см. XTLS/Xray-core#5159, #5160
-    PRIVATE_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
-    PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+    # Поддерживаем форматы:
+    #   "Private key: ..." / "Public key: ..."           (старый)
+    #   "PrivateKey: ..."  / "Password: ..."              (v25.3.6+)
+    #   "PrivateKey: ..."  / "Password (PublicKey): ..."  (после PR XTLS/Xray-core#5759)
+    PRIVATE_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Private[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+    PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Public[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
     if [ -z "$PUBLIC_KEY" ]; then
-        PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Password:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+        # ловим "Password:" и "Password (PublicKey):" и т.п.
+        PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Password[^:]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
     fi
 
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
