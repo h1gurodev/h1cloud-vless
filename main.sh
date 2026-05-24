@@ -391,11 +391,19 @@ ensure_reality_files() {
     fi
 
     KEYS_OUTPUT="$("$XRAY_BIN" x25519 2>/dev/null)"
-    PRIVATE_KEY="$(echo "$KEYS_OUTPUT" | sed -n 's/.*Private key: *//p' | head -n 1 | tr -d '[:space:]')"
-    PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n 's/.*Public key: *//p' | head -n 1 | tr -d '[:space:]')"
+    # Старый формат: "Private key:" / "Public key:"
+    # Новый формат (xray v25.3.6+): "PrivateKey:" / "Password:" (Password = публичный ключ)
+    # см. XTLS/Xray-core#5159, #5160
+    PRIVATE_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Private[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+    PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Public[[:space:]]*[Kk]ey:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+    if [ -z "$PUBLIC_KEY" ]; then
+        PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/.*Password:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
+    fi
 
     if [ -z "$PRIVATE_KEY" ] || [ -z "$PUBLIC_KEY" ]; then
         echo "cannot generate reality x25519 keys"
+        echo "xray x25519 output was:"
+        echo "$KEYS_OUTPUT"
         return 1
     fi
 
