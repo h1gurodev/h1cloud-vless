@@ -1,6 +1,13 @@
 #!/bin/bash
 set +e
 
+export PYTHONUNBUFFERED=1
+export PYTHONIOENCODING=UTF-8
+
+blank() {
+    printf ' \n'
+}
+
 XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 DATA_DIR="."
 USERS_FILE="$DATA_DIR/users.json"
@@ -113,7 +120,7 @@ ensure_domain() {
         return 0
     fi
 
-    echo ""
+    blank
     echo "Enter domain connected in Pterodactyl Domains:"
     read -r INPUT_DOMAIN
 
@@ -484,7 +491,7 @@ lines.append(f"reality_public_port: {reality_port}")
 lines.append(f"reality_sni: {reality_sni}")
 if sub_port and sub_token:
     lines.append(f"sub_public_port: {sub_port}")
-lines.append("")
+lines.append(" ")
 
 def ws_link(name, uuid):
     tag = urllib.parse.quote(f"{name}-ws", safe="")
@@ -532,7 +539,7 @@ for u in users:
     if sub:
         lines.append("subscription:")
         lines.append(sub)
-    lines.append("")
+    lines.append(" ")
 
 if active_count == 0:
     lines.append("no users")
@@ -1331,7 +1338,7 @@ start_api_process() {
         SUB_TOKEN_VALUE="$(get_sub_token)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$PORT_VALUE" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$PORT_VALUE" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" <<'PY' &
 import datetime
 import json
 import os
@@ -1569,7 +1576,7 @@ def write_keys(users):
         f"ws_public_port: {PUBLIC_PORT}",
         f"reality_public_port: {PUBLIC_REALITY_PORT}",
         f"reality_sni: {REALITY_SNI}",
-        "",
+        " ",
     ]
 
     if SUB_PORT and SUB_TOKEN:
@@ -1596,7 +1603,7 @@ def write_keys(users):
             if sub_url:
                 lines.append("subscription:")
                 lines.append(sub_url)
-            lines.append("")
+            lines.append(" ")
         except Exception:
             pass
 
@@ -2097,7 +2104,7 @@ start_sub_process() {
     WS_PUBLIC_PORT_VALUE="$(get_public_port)"
     echo "$PORT_VALUE" > "$SUB_PORT_FILE"
 
-    python3 - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$PORT_VALUE" "$WS_PUBLIC_PORT_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$PORT_VALUE" "$WS_PUBLIC_PORT_VALUE" <<'PY' &
 import base64
 import datetime
 import json
@@ -2579,7 +2586,7 @@ start_server() {
     echo "reality sni: $(get_reality_sni)"
     echo "type: vpn help"
     print_line
-    echo ""
+    blank
     echo "h1cloud.su - лучший хостинг"
     echo "t.me/h1cloudbot"
     echo "Программист - h1guro.ovh"
