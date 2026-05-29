@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.05.29-autoupdate-ban"
+SCRIPT_VERSION="2026.05.29-upd1"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -2789,6 +2789,168 @@ def first_value(mapping, *names):
     return ""
 
 
+def embedded_panel_html():
+    return """<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>H1Cloud VLESS Panel</title>
+  <style>
+    :root { color-scheme: dark; --bg:#07090d; --panel:#111720; --line:#263140; --text:#e7ecf3; --muted:#8f9aac; --ok:#43e189; --cyan:#26d6e5; --red:#f87171; --warn:#fb923c; }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 Inter, system-ui, -apple-system, Segoe UI, Arial, sans-serif; }
+    main { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 26px 0 50px; }
+    header, section { border-bottom: 1px solid rgba(255,255,255,.08); padding: 18px 0; }
+    h1, h2, h3 { margin: 0 0 8px; }
+    p, small { color: var(--muted); }
+    .bar, .grid, form, .links, .actions { display: flex; gap: 10px; flex-wrap: wrap; align-items: end; }
+    .card, table { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+    .card { padding: 16px; margin: 12px 0; }
+    label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
+    input { min-width: 210px; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: #090d13; color: var(--text); }
+    button { min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; background: #121923; color: var(--text); cursor: pointer; font-weight: 700; }
+    button.primary { border: 0; color: #061018; background: linear-gradient(135deg, var(--ok), var(--cyan)); }
+    button.danger { color: var(--red); }
+    table { width: 100%; border-collapse: collapse; overflow: hidden; }
+    th, td { padding: 12px; border-bottom: 1px solid rgba(255,255,255,.08); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 12px; text-transform: uppercase; }
+    code { overflow-wrap: anywhere; color: #dfe7f3; }
+    .pill { display: inline-flex; min-height: 26px; align-items: center; border-radius: 999px; padding: 0 9px; border: 1px solid var(--line); font-weight: 800; font-size: 12px; }
+    .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--red); }
+    .links button { min-height: 30px; font-size: 12px; }
+    pre { margin: 0; white-space: pre-wrap; color: var(--muted); }
+    @media (max-width: 760px) { input { min-width: 100%; } th:nth-child(3), td:nth-child(3) { min-width: 240px; } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>H1Cloud VLESS Panel</h1>
+    <p id="line">API: <code id="apiBase"></code></p>
+    <div class="bar">
+      <label>API Token <input id="token" type="password" autocomplete="off" /></label>
+      <button class="primary" id="connect">Connect</button>
+      <button id="refresh">Refresh</button>
+    </div>
+  </header>
+
+  <section>
+    <h2>Overview</h2>
+    <div class="grid" id="stats"></div>
+  </section>
+
+  <section>
+    <h2>Clients</h2>
+    <form id="createForm" class="card">
+      <label>Name <input id="name" autocomplete="off" placeholder="lol123" /></label>
+      <label>Days <input id="days" type="number" min="1" step="1" value="30" /></label>
+      <button class="primary" type="submit">Create</button>
+    </form>
+    <table>
+      <thead><tr><th>Client</th><th>Status</th><th>Links</th><th>Actions</th></tr></thead>
+      <tbody id="clients"><tr><td colspan="4">No data.</td></tr></tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Logs</h2>
+    <div class="card"><pre id="logs">No logs.</pre></div>
+  </section>
+</main>
+<script>
+const apiBase = location.origin + "/api";
+const $ = (id) => document.getElementById(id);
+$("apiBase").textContent = apiBase;
+$("token").value = localStorage.getItem("h1cloud.inline.token") || "";
+
+function esc(value) {
+  return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+async function api(path, options = {}) {
+  const headers = { Authorization: `Bearer ${$("token").value.trim()}`, ...(options.headers || {}) };
+  if (options.body) headers["Content-Type"] = "application/json";
+  const response = await fetch(apiBase + path, { ...options, headers, body: options.body ? JSON.stringify(options.body) : undefined });
+  const text = await response.text();
+  let payload = {};
+  try { payload = text ? JSON.parse(text) : {}; } catch { payload = { ok: false, error: text || response.statusText }; }
+  if (!response.ok || payload.ok === false) throw new Error(payload.error || response.statusText || "request_failed");
+  return payload;
+}
+
+function copyButton(label, value) {
+  if (!value) return `<button disabled>${label}</button>`;
+  return `<button data-copy="${esc(value)}">${label}</button>`;
+}
+
+function renderStats(status) {
+  const items = [
+    ["Node", status.node_name || status.domain || "-"],
+    ["Clients", `${status.clients?.active || 0} active / ${status.clients?.total || 0} total`],
+    ["WS", `:${status.ws?.public_port || "-"}`],
+    ["Reality", status.reality?.enabled ? `:${status.reality.public_port}` : "off"],
+    ["Subscription", status.subscription?.enabled ? `:${status.subscription.port}` : "off"],
+    ["Federation", status.federation?.enabled ? "on" : "off"],
+  ];
+  $("stats").innerHTML = items.map(([k, v]) => `<div class="card"><small>${esc(k)}</small><h3>${esc(v)}</h3></div>`).join("");
+}
+
+function renderClients(clients) {
+  if (!clients.length) {
+    $("clients").innerHTML = `<tr><td colspan="4">No clients.</td></tr>`;
+    return;
+  }
+  $("clients").innerHTML = clients.map((client) => {
+    const banned = Boolean(client.banned || client.status === "banned");
+    const links = client.links || {};
+    const name = esc(client.name);
+    return `<tr>
+      <td><strong>${name}</strong><br><code>${esc(client.uuid)}</code></td>
+      <td><span class="pill ${banned ? "bad" : "ok"}">${banned ? "banned" : `${client.left_days || 0} days`}</span><br><small>${esc(client.ban_reason || "")}</small></td>
+      <td><div class="links">${copyButton("WS", links.ws || client.link)}${copyButton("Reality", links.reality)}${copyButton("Sub", client.subscription_url)}</div></td>
+      <td><div class="actions"><button data-renew="${name}" data-days="30">+30</button>${banned ? `<button data-unban="${name}">Unban</button>` : `<button class="danger" data-ban="${name}">Ban</button>`}<button class="danger" data-delete="${name}">Delete</button></div></td>
+    </tr>`;
+  }).join("");
+}
+
+async function loadAll() {
+  localStorage.setItem("h1cloud.inline.token", $("token").value.trim());
+  $("line").innerHTML = `Connecting to <code>${esc(apiBase)}</code>...`;
+  const [status, clients, logs] = await Promise.all([api("/status"), api("/clients"), api("/logs?count=80")]);
+  renderStats(status);
+  renderClients(clients.clients || []);
+  $("logs").textContent = (logs.logs || []).join("\\n") || "No logs.";
+  $("line").innerHTML = `Connected: <code>${esc(status.node_name || status.domain || apiBase)}</code>`;
+}
+
+$("connect").onclick = () => loadAll().catch((error) => $("line").textContent = "Error: " + error.message);
+$("refresh").onclick = $("connect").onclick;
+$("createForm").onsubmit = async (event) => {
+  event.preventDefault();
+  await api("/clients", { method: "POST", body: { name: $("name").value.trim(), days: Number($("days").value || 30) } });
+  $("name").value = "";
+  await loadAll();
+};
+document.addEventListener("click", async (event) => {
+  const button = event.target.closest("button");
+  if (!button) return;
+  try {
+    if (button.dataset.copy) await navigator.clipboard.writeText(button.dataset.copy);
+    if (button.dataset.renew) await api(`/clients/${encodeURIComponent(button.dataset.renew)}`, { method: "PATCH", body: { days: Number(button.dataset.days || 30) } });
+    if (button.dataset.ban) await api(`/clients/${encodeURIComponent(button.dataset.ban)}/ban`, { method: "PATCH", body: { reason: prompt("Reason", "") || "" } });
+    if (button.dataset.unban) await api(`/clients/${encodeURIComponent(button.dataset.unban)}/unban`, { method: "PATCH", body: {} });
+    if (button.dataset.delete && confirm(`Delete ${button.dataset.delete}?`)) await api(`/clients/${encodeURIComponent(button.dataset.delete)}`, { method: "DELETE" });
+    if (!button.dataset.copy) await loadAll();
+  } catch (error) {
+    $("line").textContent = "Error: " + error.message;
+  }
+});
+</script>
+</body>
+</html>"""
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "H1CloudVPNAPI/1.0"
 
@@ -2812,10 +2974,10 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def send_text(self, status, text):
+    def send_text(self, status, text, content_type="text/plain; charset=utf-8"):
         body = text.encode("utf-8")
         self.send_response(status)
-        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -2880,6 +3042,10 @@ class Handler(BaseHTTPRequestHandler):
             parts = parts[1:]
             path = "/".join(parts)
 
+        if method == "GET" and parts and parts[0] in ("panel", "panel.html"):
+            self.send_text(200, embedded_panel_html(), "text/html; charset=utf-8")
+            return
+
         if method == "GET" and path in ("", "health"):
             payload = {
                 "ok": True,
@@ -2897,6 +3063,7 @@ class Handler(BaseHTTPRequestHandler):
                     "PATCH /clients/NAME/ban",
                     "PATCH /clients/NAME/unban",
                     "DELETE /clients/NAME",
+                    "GET /panel",
                     "GET /keys",
                     "GET /logs",
                 ],
