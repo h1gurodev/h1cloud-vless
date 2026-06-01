@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.05.29-upd1"
+SCRIPT_VERSION="2026.06.01-cdn-ws"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -34,6 +34,12 @@ REALITY_PUBLIC_PORT_FILE="$DATA_DIR/reality_public_port.txt"
 SUB_TOKEN_FILE="$DATA_DIR/sub_token.txt"
 SUB_PORT_FILE="$DATA_DIR/sub_port.txt"
 SUB_PID_FILE="$DATA_DIR/sub.pid"
+SUB_NAME_FILE="$DATA_DIR/sub_name.txt"
+CDN_WS_ENABLED_FILE="$DATA_DIR/cdn_ws_enabled.txt"
+CDN_WS_HOST_FILE="$DATA_DIR/cdn_ws_host.txt"
+CDN_WS_SNI_FILE="$DATA_DIR/cdn_ws_sni.txt"
+CDN_WS_PORT_FILE="$DATA_DIR/cdn_ws_port.txt"
+CDN_WS_TAG_FILE="$DATA_DIR/cdn_ws_tag.txt"
 PEERS_FILE="$DATA_DIR/peers.txt"
 NODES_FILE="$DATA_DIR/nodes.json"
 JOIN_TOKEN_FILE="$DATA_DIR/join_token.txt"
@@ -416,6 +422,142 @@ get_sub_port() {
     fi
 
     echo ""
+    return 0
+}
+
+get_sub_name() {
+    if [ -n "${SUB_NAME:-${VPN_SUB_NAME:-}}" ]; then
+        printf '%s\n' "${SUB_NAME:-${VPN_SUB_NAME:-}}"
+        return 0
+    fi
+
+    if [ -f "$SUB_NAME_FILE" ] && [ -s "$SUB_NAME_FILE" ]; then
+        head -n 1 "$SUB_NAME_FILE"
+        return 0
+    fi
+
+    echo ""
+    return 0
+}
+
+append_sub_name_fragment() {
+    local URL_VALUE="$1"
+    local NAME_VALUE="$2"
+
+    if [ -z "$URL_VALUE" ] || [ -z "$NAME_VALUE" ]; then
+        echo "$URL_VALUE"
+        return 0
+    fi
+
+    python3 - "$URL_VALUE" "$NAME_VALUE" <<'PY'
+import sys
+import urllib.parse
+
+url = sys.argv[1]
+name = sys.argv[2]
+print(url.split("#", 1)[0] + "#" + urllib.parse.quote(name, safe=""))
+PY
+}
+
+is_cdn_ws_enabled() {
+    local VALUE HOST_VALUE
+
+    VALUE="${CDN_WS_ENABLED:-${VPN_CDN_WS:-}}"
+    if [ -n "$VALUE" ]; then
+        if is_enabled_value "$VALUE"; then
+            return 0
+        fi
+        if is_disabled_value "$VALUE"; then
+            return 1
+        fi
+    fi
+
+    if [ -f "$CDN_WS_ENABLED_FILE" ] && [ -s "$CDN_WS_ENABLED_FILE" ]; then
+        VALUE="$(head -n 1 "$CDN_WS_ENABLED_FILE" 2>/dev/null)"
+        if is_enabled_value "$VALUE"; then
+            return 0
+        fi
+        if is_disabled_value "$VALUE"; then
+            return 1
+        fi
+    fi
+
+    HOST_VALUE="$(get_cdn_ws_host)"
+    [ -n "$HOST_VALUE" ]
+}
+
+set_cdn_ws_enabled() {
+    if [ "$1" = "1" ]; then
+        echo "1" > "$CDN_WS_ENABLED_FILE"
+    else
+        echo "0" > "$CDN_WS_ENABLED_FILE"
+    fi
+    return 0
+}
+
+get_cdn_ws_host() {
+    if [ -n "${CDN_WS_HOST:-${VPN_CDN_WS_HOST:-}}" ]; then
+        normalize_domain "${CDN_WS_HOST:-${VPN_CDN_WS_HOST:-}}"
+        return 0
+    fi
+
+    if [ -f "$CDN_WS_HOST_FILE" ] && [ -s "$CDN_WS_HOST_FILE" ]; then
+        normalize_domain "$(head -n 1 "$CDN_WS_HOST_FILE" 2>/dev/null)"
+        return 0
+    fi
+
+    echo ""
+    return 0
+}
+
+get_cdn_ws_sni() {
+    if [ -n "${CDN_WS_SNI:-${VPN_CDN_WS_SNI:-}}" ]; then
+        normalize_domain "${CDN_WS_SNI:-${VPN_CDN_WS_SNI:-}}"
+        return 0
+    fi
+
+    if [ -f "$CDN_WS_SNI_FILE" ] && [ -s "$CDN_WS_SNI_FILE" ]; then
+        normalize_domain "$(head -n 1 "$CDN_WS_SNI_FILE" 2>/dev/null)"
+        return 0
+    fi
+
+    get_cdn_ws_host
+    return 0
+}
+
+get_cdn_ws_port() {
+    local PORT_VALUE
+
+    PORT_VALUE="${CDN_WS_PORT:-${VPN_CDN_WS_PORT:-}}"
+    if validate_port "$PORT_VALUE"; then
+        echo "$PORT_VALUE"
+        return 0
+    fi
+
+    if [ -f "$CDN_WS_PORT_FILE" ] && [ -s "$CDN_WS_PORT_FILE" ]; then
+        PORT_VALUE="$(head -n 1 "$CDN_WS_PORT_FILE" 2>/dev/null)"
+        if validate_port "$PORT_VALUE"; then
+            echo "$PORT_VALUE"
+            return 0
+        fi
+    fi
+
+    echo "443"
+    return 0
+}
+
+get_cdn_ws_tag_suffix() {
+    if [ -n "${CDN_WS_TAG:-${VPN_CDN_WS_TAG:-}}" ]; then
+        printf '%s\n' "${CDN_WS_TAG:-${VPN_CDN_WS_TAG:-}}"
+        return 0
+    fi
+
+    if [ -f "$CDN_WS_TAG_FILE" ] && [ -s "$CDN_WS_TAG_FILE" ]; then
+        head -n 1 "$CDN_WS_TAG_FILE"
+        return 0
+    fi
+
+    echo "CDN"
     return 0
 }
 
@@ -927,7 +1069,7 @@ PY
         return 1
     fi
 
-    echo "http://$SUB_PUBLIC_HOST:$SUB_PORT_VALUE/sub/$SUB_ID"
+    append_sub_name_fragment "http://$SUB_PUBLIC_HOST:$SUB_PORT_VALUE/sub/$SUB_ID" "$(get_sub_name)"
     return 0
 }
 
@@ -944,6 +1086,12 @@ sync_keys_file() {
     SUB_PORT_VALUE="$(get_sub_port)"
     SUB_TOKEN_VALUE=""
     SUB_PUBLIC_HOST_VALUE=""
+    SUB_NAME_VALUE="$(get_sub_name)"
+    CDN_WS_ENABLED_VALUE="0"
+    CDN_WS_HOST_VALUE=""
+    CDN_WS_SNI_VALUE=""
+    CDN_WS_PORT_VALUE=""
+    CDN_WS_TAG_VALUE=""
 
     if is_reality_enabled && ensure_reality_files >/dev/null 2>&1; then
         REALITY_ENABLED_VALUE="1"
@@ -958,7 +1106,15 @@ sync_keys_file() {
         SUB_PUBLIC_HOST_VALUE="$(read_subscription_host)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" <<'PY'
+    if is_cdn_ws_enabled; then
+        CDN_WS_ENABLED_VALUE="1"
+        CDN_WS_HOST_VALUE="$(get_cdn_ws_host)"
+        CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
+        CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
+        CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+    fi
+
+    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY'
 import datetime
 import json
 import sys
@@ -979,6 +1135,12 @@ reality_short_id = sys.argv[11]
 sub_port = sys.argv[12]
 sub_token = sys.argv[13]
 sub_public_host = sys.argv[14]
+sub_name = sys.argv[15]
+cdn_ws_enabled = sys.argv[16] == "1"
+cdn_ws_host = sys.argv[17]
+cdn_ws_sni = sys.argv[18] or cdn_ws_host
+cdn_ws_port = sys.argv[19] or "443"
+cdn_ws_tag_suffix = sys.argv[20] or "CDN"
 now = int(time.time())
 
 try:
@@ -1004,6 +1166,10 @@ else:
 if sub_port:
     lines.append(f"sub_public_port: {sub_port}")
     lines.append(f"sub_public_host: {sub_public_host}")
+if sub_name:
+    lines.append(f"sub_name: {sub_name}")
+if cdn_ws_enabled:
+    lines.append(f"cdn_ws: {cdn_ws_host}:{cdn_ws_port} sni={cdn_ws_sni}")
 lines.append(" ")
 
 def ws_link(name, uuid):
@@ -1011,6 +1177,16 @@ def ws_link(name, uuid):
     if str(ws_port) == "443":
         return f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=tls&sni={domain}&host={domain}&path=%2Fxray&encryption=none#{tag}"
     return f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{tag}"
+
+def cdn_ws_link(name, uuid):
+    if not cdn_ws_enabled or not cdn_ws_host:
+        return ""
+    tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
+    return (
+        f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
+        f"?security=tls&sni={cdn_ws_sni}&type=ws&path=/xray"
+        f"&host={cdn_ws_sni}&encryption=none#{tag}"
+    )
 
 def reality_link(name, uuid):
     tag = urllib.parse.quote(f"{node_name} Reality", safe="")
@@ -1026,7 +1202,10 @@ def subscription_url(name, uuid):
         return ""
     quoted_uuid = urllib.parse.quote(uuid, safe="")
     host = sub_public_host or domain
-    return f"http://{host}:{sub_port}/sub/{quoted_uuid}"
+    url = f"http://{host}:{sub_port}/sub/{quoted_uuid}"
+    if sub_name:
+        url += "#" + urllib.parse.quote(sub_name, safe="")
+    return url
 
 active_count = 0
 listed_count = 0
@@ -1059,6 +1238,11 @@ for u in users:
     lines.append(f"{name} | uuid: {uuid} | expires: {date} | left: {days_left}d {hours_left}h")
     lines.append("ws:")
     lines.append(ws_link(name, uuid))
+    if cdn_ws_enabled:
+        cdn_link = cdn_ws_link(name, uuid)
+        if cdn_link:
+            lines.append("ws-cdn:")
+            lines.append(cdn_link)
     if reality_enabled:
         lines.append("reality:")
         lines.append(reality_link(name, uuid))
@@ -1334,6 +1518,11 @@ make_link() {
     REALITY_PUBLIC_KEY_VALUE=""
     REALITY_SHORT_ID_VALUE=""
     SUB_URL_VALUE="$(make_subscription_url "$NAME" 2>/dev/null || true)"
+    CDN_WS_ENABLED_VALUE="0"
+    CDN_WS_HOST_VALUE=""
+    CDN_WS_SNI_VALUE=""
+    CDN_WS_PORT_VALUE=""
+    CDN_WS_TAG_VALUE=""
 
     if is_reality_enabled && ensure_reality_files >/dev/null 2>&1; then
         REALITY_ENABLED_VALUE="1"
@@ -1344,7 +1533,15 @@ make_link() {
         REALITY_SHORT_ID_VALUE="$(read_reality_short_id)"
     fi
 
-    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" <<'PY'
+    if is_cdn_ws_enabled; then
+        CDN_WS_ENABLED_VALUE="1"
+        CDN_WS_HOST_VALUE="$(get_cdn_ws_host)"
+        CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
+        CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
+        CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+    fi
+
+    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY'
 import json, sys
 import urllib.parse
 
@@ -1360,6 +1557,11 @@ reality_sni = sys.argv[9]
 reality_public_key = sys.argv[10]
 reality_short_id = sys.argv[11]
 sub_url = sys.argv[12]
+cdn_ws_enabled = sys.argv[13] == "1"
+cdn_ws_host = sys.argv[14]
+cdn_ws_sni = sys.argv[15] or cdn_ws_host
+cdn_ws_port = sys.argv[16] or "443"
+cdn_ws_tag_suffix = sys.argv[17] or "CDN"
 
 try:
     with open(users_file, "r", encoding="utf-8") as f:
@@ -1380,6 +1582,15 @@ for u in users:
             ws_link = f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         print("ws:")
         print(ws_link)
+        if cdn_ws_enabled and cdn_ws_host:
+            cdn_tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
+            cdn_link = (
+                f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
+                f"?security=tls&sni={cdn_ws_sni}&type=ws&path=/xray"
+                f"&host={cdn_ws_sni}&encryption=none#{cdn_tag}"
+            )
+            print("ws-cdn:")
+            print(cdn_link)
         if reality_enabled:
             reality_tag = urllib.parse.quote(f"{node_name} Reality", safe="")
             reality_link = (
@@ -1466,6 +1677,8 @@ cmd_help() {
     echo "vpn keys                   show all keys and recent logs"
     echo "vpn logs [COUNT]           show action logs"
     echo "vpn node NAME              set node/location name for link tags"
+    echo "vpn cdn HOST SNI [PORT]    add WS-CDN links for all clients"
+    echo "vpn cdn off/status         manage generated WS-CDN links"
     echo "vpn join-token             show token for node auto-registration"
     echo "vpn join MASTER TOKEN NAME auto-register this node on master"
     echo "vpn peer add NAME URL      add remote node raw subscription URL"
@@ -1486,6 +1699,7 @@ cmd_help() {
     echo "vpn api status             show API status"
     echo "vpn api token              show API token"
     echo "vpn sub PORT               start subscription on 0.0.0.0:PORT"
+    echo "vpn sub name NAME          set subscription display name"
     echo "vpn sub stop/status/token  manage subscription server"
     echo "vpn restart                restart xray"
     echo "vpn stop                   stop server"
@@ -1496,6 +1710,8 @@ cmd_help() {
     echo "vpn ban test abuse"
     echo "vpn unban test"
     echo "vpn node Germany"
+    echo "vpn cdn cdn.de.h1cloud.su top2355543541.mwscdn.ru 443 CDN"
+    echo "vpn sub name Germany-VPN"
     echo "vpn join-token"
     echo "vpn join http://MASTER:PORT/api JOIN_TOKEN Germany"
     echo "vpn peer add de http://IP:PORT/sub/{uuid}/local"
@@ -1525,6 +1741,18 @@ cmd_add() {
     if ! validate_days "$DAYS"; then
         echo "days must be number bigger than 0"
         echo "usage: vpn add NAME DAYS"
+        return 0
+    fi
+
+    if upstream_configured; then
+        EXISTING_UUID="$(local_user_uuid "$NAME" 2>/dev/null)"
+        echo "federation upstream enabled: creating user on master..."
+        if forward_client_to_upstream create "$NAME" "$DAYS" "$EXISTING_UUID"; then
+            sync_after_upstream_client_write "$NAME" link
+        else
+            echo "upstream create failed"
+            sync_after_upstream_client_write "$NAME" link
+        fi
         return 0
     fi
 
@@ -1597,6 +1825,16 @@ cmd_del() {
         return 0
     fi
 
+    if upstream_configured; then
+        echo "federation upstream enabled: deleting user on master..."
+        if forward_client_to_upstream delete "$NAME"; then
+            sync_after_upstream_client_write "$NAME"
+        else
+            echo "upstream delete failed"
+        fi
+        return 0
+    fi
+
     python3 - "$USERS_FILE" "$NAME" <<'PY'
 import json, sys
 
@@ -1642,6 +1880,16 @@ cmd_ban() {
 
     if ! validate_name "$NAME"; then
         echo "usage: vpn ban NAME [REASON]"
+        return 0
+    fi
+
+    if upstream_configured; then
+        echo "federation upstream enabled: banning user on master..."
+        if forward_client_to_upstream ban "$NAME" "$REASON"; then
+            sync_after_upstream_client_write "$NAME"
+        else
+            echo "upstream ban failed"
+        fi
         return 0
     fi
 
@@ -1699,6 +1947,16 @@ cmd_unban() {
 
     if ! validate_name "$NAME"; then
         echo "usage: vpn unban NAME"
+        return 0
+    fi
+
+    if upstream_configured; then
+        echo "federation upstream enabled: unbanning user on master..."
+        if forward_client_to_upstream unban "$NAME"; then
+            sync_after_upstream_client_write "$NAME"
+        else
+            echo "upstream unban failed"
+        fi
         return 0
     fi
 
@@ -1895,6 +2153,16 @@ cmd_renew() {
         return 0
     fi
 
+    if upstream_configured; then
+        echo "federation upstream enabled: renewing user on master..."
+        if forward_client_to_upstream renew "$NAME" "$DAYS"; then
+            sync_after_upstream_client_write "$NAME"
+        else
+            echo "upstream renew failed"
+        fi
+        return 0
+    fi
+
     python3 - "$USERS_FILE" "$NAME" "$DAYS" <<'PY'
 import json, sys, time
 
@@ -2051,6 +2319,84 @@ cmd_reality() {
     return 0
 }
 
+cmd_cdn() {
+    local ACTION="${1:-status}"
+    local CDN_HOST_VALUE SNI_HOST_VALUE PORT_VALUE TAG_VALUE
+
+    case "$ACTION" in
+        status|"")
+            print_line
+            echo "WS-CDN"
+            print_line
+            if is_cdn_ws_enabled; then
+                echo "status: enabled"
+                echo "cdn address: $(get_cdn_ws_host)"
+                echo "sni/host: $(get_cdn_ws_sni)"
+                echo "port: $(get_cdn_ws_port)"
+                echo "tag suffix: $(get_cdn_ws_tag_suffix)"
+                echo "origin remains: $(read_domain):$(get_public_port) /xray"
+            else
+                echo "status: disabled"
+                echo "enable: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+            fi
+            print_line
+            ;;
+        off|disable|disabled|stop)
+            set_cdn_ws_enabled 0
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "cdn_ws_disable" ""
+            echo "ws-cdn disabled"
+            ;;
+        on|enable|add|ws)
+            CDN_HOST_VALUE="$(normalize_domain "${2:-}")"
+            SNI_HOST_VALUE="$(normalize_domain "${3:-}")"
+            PORT_VALUE="${4:-443}"
+            TAG_VALUE="$(strip_outer_quotes "${5:-CDN}")"
+            if [ -z "$CDN_HOST_VALUE" ] || [ -z "$SNI_HOST_VALUE" ] || ! validate_port "$PORT_VALUE"; then
+                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                echo "or:    vpn cdn ws CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                return 0
+            fi
+            echo "$CDN_HOST_VALUE" > "$CDN_WS_HOST_FILE"
+            echo "$SNI_HOST_VALUE" > "$CDN_WS_SNI_FILE"
+            echo "$PORT_VALUE" > "$CDN_WS_PORT_FILE"
+            echo "${TAG_VALUE:-CDN}" > "$CDN_WS_TAG_FILE"
+            set_cdn_ws_enabled 1
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN}"
+            echo "ws-cdn saved"
+            echo "current and future clients will include ws-cdn links"
+            ;;
+        *)
+            CDN_HOST_VALUE="$(normalize_domain "$ACTION")"
+            SNI_HOST_VALUE="$(normalize_domain "${2:-}")"
+            PORT_VALUE="${3:-443}"
+            TAG_VALUE="$(strip_outer_quotes "${4:-CDN}")"
+            if [ -z "$CDN_HOST_VALUE" ] || [ -z "$SNI_HOST_VALUE" ] || ! validate_port "$PORT_VALUE"; then
+                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                return 0
+            fi
+            echo "$CDN_HOST_VALUE" > "$CDN_WS_HOST_FILE"
+            echo "$SNI_HOST_VALUE" > "$CDN_WS_SNI_FILE"
+            echo "$PORT_VALUE" > "$CDN_WS_PORT_FILE"
+            echo "${TAG_VALUE:-CDN}" > "$CDN_WS_TAG_FILE"
+            set_cdn_ws_enabled 1
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN}"
+            echo "ws-cdn saved"
+            echo "current and future clients will include ws-cdn links"
+            ;;
+    esac
+
+    return 0
+}
+
 api_is_running() {
     PID="${API_PID:-}"
 
@@ -2093,12 +2439,13 @@ start_api_process() {
     # именами в start_sub_process/restart_api_if_running/keep_api_alive
     # (бывало, что api при старте печатал чужой порт).
     local API_BIND_PORT="$1"
-    local TOKEN LOCAL_PORT PUBLIC_PORT_VALUE
+    local TOKEN LOCAL_PORT PUBLIC_PORT_VALUE NODE_NAME_VALUE
     local REALITY_ENABLED_VALUE REALITY_LOCAL_PORT_VALUE REALITY_PUBLIC_PORT_VALUE REALITY_PUBLIC_HOST_VALUE
     local REALITY_SNI_VALUE REALITY_DEST_VALUE
     local REALITY_PRIVATE_KEY_VALUE REALITY_PUBLIC_KEY_VALUE REALITY_SHORT_ID_VALUE
     local SUB_PORT_VALUE SUB_TOKEN_VALUE SUB_PUBLIC_HOST_VALUE RUNNING_PORT
     local API_PUBLIC_HOST_VALUE JOIN_TOKEN_VALUE
+    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE
 
     if ! validate_port "$API_BIND_PORT"; then
         echo "usage: vpn api PORT"
@@ -2146,13 +2493,27 @@ start_api_process() {
     SUB_PORT_VALUE="$(get_sub_port)"
     SUB_TOKEN_VALUE=""
     SUB_PUBLIC_HOST_VALUE=""
+    SUB_NAME_VALUE="$(get_sub_name)"
+    CDN_WS_ENABLED_VALUE="0"
+    CDN_WS_HOST_VALUE=""
+    CDN_WS_SNI_VALUE=""
+    CDN_WS_PORT_VALUE=""
+    CDN_WS_TAG_VALUE=""
 
     if [ -n "$SUB_PORT_VALUE" ] && validate_port "$SUB_PORT_VALUE"; then
         SUB_TOKEN_VALUE="$(get_sub_token)"
         SUB_PUBLIC_HOST_VALUE="$(read_subscription_host)"
     fi
 
-    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" <<'PY' &
+    if is_cdn_ws_enabled; then
+        CDN_WS_ENABLED_VALUE="1"
+        CDN_WS_HOST_VALUE="$(get_cdn_ws_host)"
+        CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
+        CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
+        CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+    fi
+
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" <<'PY' &
 import datetime
 import hashlib
 import json
@@ -2160,6 +2521,7 @@ import os
 import re
 import sys
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -2205,6 +2567,29 @@ XRAY_STATS_PORT = int(sys.argv[31])
 XRAY_BIN = sys.argv[32]
 UPDATE_URL_FILE = sys.argv[33]
 AUTO_UPDATE_FILE = sys.argv[34]
+SUB_NAME = sys.argv[35].strip()
+CDN_WS_ENABLED = sys.argv[36] == "1"
+CDN_WS_HOST = sys.argv[37]
+CDN_WS_SNI = sys.argv[38] or CDN_WS_HOST
+CDN_WS_PORT = sys.argv[39] or "443"
+CDN_WS_TAG = sys.argv[40] or "CDN"
+API_TOKEN_FILE = TOKEN_FILE
+SUB_TOKEN_FILE = sys.argv[41]
+REALITY_ENABLED_FILE = sys.argv[42]
+REALITY_PRIVATE_KEY_FILE = sys.argv[43]
+REALITY_PUBLIC_KEY_FILE = sys.argv[44]
+REALITY_SHORT_ID_FILE = sys.argv[45]
+REALITY_SNI_FILE = sys.argv[46]
+REALITY_DEST_FILE = sys.argv[47]
+REALITY_PORT_FILE = sys.argv[48]
+REALITY_PUBLIC_PORT_FILE = sys.argv[49]
+PUBLIC_IP_FILE = sys.argv[50]
+SUB_NAME_FILE = sys.argv[51]
+CDN_WS_ENABLED_FILE = sys.argv[52]
+CDN_WS_HOST_FILE = sys.argv[53]
+CDN_WS_SNI_FILE = sys.argv[54]
+CDN_WS_PORT_FILE = sys.argv[55]
+CDN_WS_TAG_FILE = sys.argv[56]
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -2379,6 +2764,8 @@ def backup_targets():
         USERS_FILE, DOMAIN_FILE, CONFIG_FILE, KEY_FILE, NODE_NAME_FILE, ACTION_LOG_FILE,
         API_TOKEN_FILE, SUB_TOKEN_FILE, PEERS_FILE, NODES_FILE, JOIN_TOKEN_FILE,
         UPSTREAM_API_URL_FILE, UPSTREAM_API_TOKEN_FILE, UPDATE_URL_FILE, AUTO_UPDATE_FILE,
+        SUB_NAME_FILE, CDN_WS_ENABLED_FILE, CDN_WS_HOST_FILE, CDN_WS_SNI_FILE,
+        CDN_WS_PORT_FILE, CDN_WS_TAG_FILE,
         REALITY_ENABLED_FILE, REALITY_PRIVATE_KEY_FILE, REALITY_PUBLIC_KEY_FILE,
         REALITY_SHORT_ID_FILE, REALITY_SNI_FILE, REALITY_DEST_FILE,
         REALITY_PORT_FILE, REALITY_PUBLIC_PORT_FILE, PUBLIC_IP_FILE,
@@ -2421,6 +2808,99 @@ def federation_payload():
         "enabled": bool(upstream_url and read_first_line(UPSTREAM_API_TOKEN_FILE)),
         "upstream_url": upstream_url,
     }
+
+
+def upstream_config():
+    api_url = strip_outer_quotes(read_first_line(UPSTREAM_API_URL_FILE)).rstrip("/")
+    token = strip_outer_quotes(read_first_line(UPSTREAM_API_TOKEN_FILE))
+    if not api_url or not token:
+        return "", ""
+    return api_url, token
+
+
+def upstream_enabled():
+    api_url, token = upstream_config()
+    return bool(api_url and token)
+
+
+def upstream_request(method, path, payload=None):
+    api_url, token = upstream_config()
+    if not api_url or not token:
+        raise ValueError("upstream_disabled")
+
+    body = None
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "H1CloudVPNAPIProxy/1.0",
+    }
+    if payload is not None:
+        body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    if not path.startswith("/"):
+        path = "/" + path
+
+    req = urllib.request.Request(api_url + path, data=body, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=12) as resp:
+            text = resp.read(1024 * 1024).decode("utf-8", "ignore")
+    except urllib.error.HTTPError as exc:
+        text = exc.read().decode("utf-8", "ignore")
+        try:
+            detail = json.loads(text).get("error") or text
+        except Exception:
+            detail = text or exc.reason
+        raise ValueError(f"upstream_http_{exc.code}: {detail}")
+
+    try:
+        data = json.loads(text) if text else {}
+    except Exception:
+        data = {}
+
+    if data and data.get("ok") is False:
+        raise ValueError(str(data.get("error", "upstream_failed")))
+    return data
+
+
+def sync_users_from_upstream():
+    data = upstream_request("GET", "/clients")
+    clients = data.get("clients", [])
+    if not isinstance(clients, list):
+        raise ValueError("bad_upstream_clients")
+
+    users = []
+    for item in clients:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name", "")).strip()
+        client_id = str(item.get("uuid", "")).strip()
+        try:
+            created_at = int(item.get("created_at", 0))
+            expires_at = int(item.get("expires_at", 0))
+        except Exception:
+            continue
+        if not name or not client_id or expires_at <= 0:
+            continue
+        users.append({
+            "name": name,
+            "uuid": client_id,
+            "created_at": created_at,
+            "expires_at": expires_at,
+            "banned": bool(item.get("banned") or item.get("disabled")),
+            "banned_at": int(item.get("banned_at", 0) or 0),
+            "ban_reason": str(item.get("ban_reason", "") or ""),
+        })
+
+    save_users(users)
+    log_action("api_upstream_sync", f"users={len(users)}")
+    return users
+
+
+def find_user_by_name(users, name):
+    for user in users:
+        if user.get("name") == name:
+            return user
+    return None
 
 
 def atomic_json(path, data):
@@ -2504,6 +2984,18 @@ def make_ws_link(user):
     )
 
 
+def make_cdn_ws_link(user):
+    if not CDN_WS_ENABLED or not CDN_WS_HOST:
+        return ""
+    client_id = str(user.get("uuid", ""))
+    tag = urllib.parse.quote(f"{read_node_name() or read_domain()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
+    return (
+        f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
+        f"?security=tls&sni={CDN_WS_SNI}&type=ws&path=/xray"
+        f"&host={CDN_WS_SNI}&encryption=none#{tag}"
+    )
+
+
 def make_reality_link(user):
     if not REALITY_ENABLED:
         return ""
@@ -2521,6 +3013,9 @@ def make_reality_link(user):
 
 def make_links(user):
     links = {"ws": make_ws_link(user)}
+    cdn_link = make_cdn_ws_link(user)
+    if cdn_link:
+        links["ws_cdn"] = cdn_link
     if REALITY_ENABLED:
         links["reality"] = make_reality_link(user)
     return links
@@ -2533,7 +3028,10 @@ def make_subscription_url(user):
     if not client_id:
         return ""
     host = SUB_PUBLIC_HOST or read_domain()
-    return f"http://{host}:{SUB_PORT}/sub/{client_id}"
+    url = f"http://{host}:{SUB_PORT}/sub/{client_id}"
+    if SUB_NAME:
+        url += "#" + urllib.parse.quote(SUB_NAME, safe="")
+    return url
 
 
 def client_payload(user):
@@ -2589,6 +3087,13 @@ def status_payload(users):
             "public_port": PUBLIC_PORT,
             "path": "/xray",
         },
+        "cdn_ws": {
+            "enabled": bool(CDN_WS_ENABLED and CDN_WS_HOST),
+            "host": CDN_WS_HOST,
+            "sni": CDN_WS_SNI,
+            "port": CDN_WS_PORT,
+            "tag_suffix": CDN_WS_TAG,
+        },
         "reality": {
             "enabled": REALITY_ENABLED,
             "local_port": REALITY_PORT if REALITY_ENABLED else None,
@@ -2601,6 +3106,7 @@ def status_payload(users):
             "enabled": bool(SUB_PORT),
             "public_host": SUB_PUBLIC_HOST,
             "port": SUB_PORT,
+            "name": SUB_NAME,
             "auth": "uuid_path",
             "legacy_token_enabled": bool(SUB_TOKEN),
         },
@@ -2714,9 +3220,13 @@ def write_keys(users):
         lines.append(f"reality_sni: {REALITY_SNI}")
     else:
         lines.append("reality: disabled")
-
     if SUB_PORT:
         lines.append(f"sub_public_port: {SUB_PORT}")
+        lines.append(f"sub_public_host: {SUB_PUBLIC_HOST}")
+    if SUB_NAME:
+        lines.append(f"sub_name: {SUB_NAME}")
+    if CDN_WS_ENABLED and CDN_WS_HOST:
+        lines.append(f"cdn_ws: {CDN_WS_HOST}:{CDN_WS_PORT} sni={CDN_WS_SNI}")
     lines.append(" ")
 
     active_count = 0
@@ -2742,6 +3252,10 @@ def write_keys(users):
             )
             lines.append("ws:")
             lines.append(make_ws_link(user))
+            cdn_link = make_cdn_ws_link(user)
+            if cdn_link:
+                lines.append("ws-cdn:")
+                lines.append(cdn_link)
             if REALITY_ENABLED:
                 lines.append("reality:")
                 lines.append(make_reality_link(user))
@@ -2808,7 +3322,9 @@ def embedded_panel_html():
     .card, table { border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
     .card { padding: 16px; margin: 12px 0; }
     label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; font-weight: 700; text-transform: uppercase; }
-    input { min-width: 210px; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: #090d13; color: var(--text); }
+    input, textarea { min-width: 210px; padding: 0 12px; border: 1px solid var(--line); border-radius: 8px; background: #090d13; color: var(--text); }
+    input { height: 42px; }
+    textarea { min-height: 92px; padding: 10px 12px; resize: vertical; }
     button { min-height: 38px; border: 1px solid var(--line); border-radius: 8px; padding: 0 12px; background: #121923; color: var(--text); cursor: pointer; font-weight: 700; }
     button.primary { border: 0; color: #061018; background: linear-gradient(135deg, var(--ok), var(--cyan)); }
     button.danger { color: var(--red); }
@@ -2819,8 +3335,9 @@ def embedded_panel_html():
     .pill { display: inline-flex; min-height: 26px; align-items: center; border-radius: 999px; padding: 0 9px; border: 1px solid var(--line); font-weight: 800; font-size: 12px; }
     .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--red); }
     .links button { min-height: 30px; font-size: 12px; }
+    .manual-grid { display: grid; grid-template-columns: minmax(180px,1fr) minmax(220px,1.1fr) 100px minmax(120px,.7fr); gap: 10px; width: 100%; }
     pre { margin: 0; white-space: pre-wrap; color: var(--muted); }
-    @media (max-width: 760px) { input { min-width: 100%; } th:nth-child(3), td:nth-child(3) { min-width: 240px; } }
+    @media (max-width: 760px) { input, textarea { min-width: 100%; } .manual-grid { grid-template-columns: 1fr; } th:nth-child(3), td:nth-child(3) { min-width: 240px; } }
   </style>
 </head>
 <body>
@@ -2851,6 +3368,22 @@ def embedded_panel_html():
       <thead><tr><th>Client</th><th>Status</th><th>Links</th><th>Actions</th></tr></thead>
       <tbody id="clients"><tr><td colspan="4">No data.</td></tr></tbody>
     </table>
+  </section>
+
+  <section>
+    <h2>Manual add</h2>
+    <form id="manualForm" class="card">
+      <label style="width: 100%;">Original VLESS <textarea id="manualSource" placeholder="vless://uuid@de.safetunn.shop:25629?type=ws&path=/xray&host=de.safetunn.shop#Germany WS"></textarea></label>
+      <div class="manual-grid">
+        <label>CDN address <input id="manualCdn" placeholder="cdn.de.h1cloud.su" /></label>
+        <label>SNI / Host <input id="manualHost" placeholder="top2355543541.mwscdn.ru" /></label>
+        <label>Port <input id="manualPort" type="number" min="1" max="65535" value="443" /></label>
+        <label>Tag suffix <input id="manualSuffix" value="CDN" /></label>
+      </div>
+      <button class="primary" type="submit">Build</button>
+      <button id="manualCopy" type="button" disabled>Copy</button>
+    </form>
+    <div class="card"><pre id="manualOutput">CDN link will appear here.</pre></div>
   </section>
 
   <section>
@@ -2885,12 +3418,15 @@ function copyButton(label, value) {
 }
 
 function renderStats(status) {
+  const cdn = status.cdn_ws || {};
+  const sub = status.subscription || {};
   const items = [
     ["Node", status.node_name || status.domain || "-"],
     ["Clients", `${status.clients?.active || 0} active / ${status.clients?.total || 0} total`],
     ["WS", `:${status.ws?.public_port || "-"}`],
+    ["WS-CDN", cdn.enabled ? `${cdn.host}:${cdn.port || 443}` : "off"],
     ["Reality", status.reality?.enabled ? `:${status.reality.public_port}` : "off"],
-    ["Subscription", status.subscription?.enabled ? `:${status.subscription.port}` : "off"],
+    ["Subscription", sub.enabled ? (sub.name || `:${sub.port}`) : "off"],
     ["Federation", status.federation?.enabled ? "on" : "off"],
   ];
   $("stats").innerHTML = items.map(([k, v]) => `<div class="card"><small>${esc(k)}</small><h3>${esc(v)}</h3></div>`).join("");
@@ -2908,10 +3444,58 @@ function renderClients(clients) {
     return `<tr>
       <td><strong>${name}</strong><br><code>${esc(client.uuid)}</code></td>
       <td><span class="pill ${banned ? "bad" : "ok"}">${banned ? "banned" : `${client.left_days || 0} days`}</span><br><small>${esc(client.ban_reason || "")}</small></td>
-      <td><div class="links">${copyButton("WS", links.ws || client.link)}${copyButton("Reality", links.reality)}${copyButton("Sub", client.subscription_url)}</div></td>
+      <td><div class="links">${copyButton("WS", links.ws || client.link)}${copyButton("WS-CDN", links.ws_cdn)}${copyButton("Reality", links.reality)}${links.ws || client.link ? `<button data-manual-link="${esc(links.ws || client.link)}">Manual add</button>` : ""}${copyButton("Sub", client.subscription_url)}</div></td>
       <td><div class="actions"><button data-renew="${name}" data-days="30">+30</button>${banned ? `<button data-unban="${name}">Unban</button>` : `<button class="danger" data-ban="${name}">Ban</button>`}<button class="danger" data-delete="${name}">Delete</button></div></td>
     </tr>`;
   }).join("");
+}
+
+function cleanHost(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  try { return new URL(raw.includes("://") ? raw : `https://${raw}`).hostname.trim(); }
+  catch { return raw.replace(/^https?:\\/\\//i, "").split("/")[0].split(":")[0].trim(); }
+}
+
+function encodeQueryValue(value) {
+  return encodeURIComponent(String(value)).replaceAll("%2F", "/");
+}
+
+function convertVlessToCdn(sourceLink) {
+  const source = String(sourceLink || "").trim();
+  const cdnHost = cleanHost($("manualCdn").value);
+  const edgeHost = cleanHost($("manualHost").value) || cdnHost;
+  const port = String($("manualPort").value || "443").trim();
+  if (!source.startsWith("vless://")) throw new Error("Paste VLESS link");
+  if (!cdnHost) throw new Error("Set CDN address");
+  if (!edgeHost) throw new Error("Set SNI / Host");
+  const parsed = new URL(source);
+  const uuid = decodeURIComponent(parsed.username || "");
+  if (!uuid) throw new Error("UUID missing");
+  const params = new URLSearchParams(parsed.search);
+  params.set("security", "tls");
+  params.set("sni", edgeHost);
+  params.set("type", params.get("type") || "ws");
+  params.set("path", params.get("path") || "/xray");
+  params.set("host", edgeHost);
+  params.set("encryption", params.get("encryption") || "none");
+  const ordered = ["security", "sni", "type", "path", "host", "encryption"];
+  const used = new Set();
+  const pairs = [];
+  for (const key of ordered) {
+    if (params.has(key)) { used.add(key); pairs.push([key, params.get(key) || ""]); }
+  }
+  params.forEach((value, key) => { if (!used.has(key)) pairs.push([key, value]); });
+  const query = pairs.map(([key, value]) => `${encodeURIComponent(key)}=${encodeQueryValue(value)}`).join("&");
+  const oldTag = decodeURIComponent(parsed.hash.replace(/^#/, "")) || "WS";
+  const suffix = String($("manualSuffix").value || "").trim();
+  const tag = (suffix ? `${oldTag} ${suffix}` : oldTag).trim().replace(/\\s+/g, "-");
+  return `vless://${encodeURIComponent(uuid)}@${cdnHost}:${port}?${query}#${encodeURIComponent(tag)}`;
+}
+
+function fillManual(link) {
+  $("manualSource").value = link || "";
+  $("manualSource").focus();
 }
 
 async function loadAll() {
@@ -2932,6 +3516,16 @@ $("createForm").onsubmit = async (event) => {
   $("name").value = "";
   await loadAll();
 };
+$("manualForm").onsubmit = async (event) => {
+  event.preventDefault();
+  try {
+    $("manualOutput").textContent = convertVlessToCdn($("manualSource").value);
+    $("manualCopy").disabled = false;
+  } catch (error) {
+    $("line").textContent = "Error: " + error.message;
+  }
+};
+$("manualCopy").onclick = () => navigator.clipboard.writeText($("manualOutput").textContent);
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
@@ -2941,7 +3535,8 @@ document.addEventListener("click", async (event) => {
     if (button.dataset.ban) await api(`/clients/${encodeURIComponent(button.dataset.ban)}/ban`, { method: "PATCH", body: { reason: prompt("Reason", "") || "" } });
     if (button.dataset.unban) await api(`/clients/${encodeURIComponent(button.dataset.unban)}/unban`, { method: "PATCH", body: {} });
     if (button.dataset.delete && confirm(`Delete ${button.dataset.delete}?`)) await api(`/clients/${encodeURIComponent(button.dataset.delete)}`, { method: "DELETE" });
-    if (!button.dataset.copy) await loadAll();
+    if (button.dataset.manualLink) fillManual(button.dataset.manualLink);
+    if (!button.dataset.copy && !button.dataset.manualLink) await loadAll();
   } catch (error) {
     $("line").textContent = "Error: " + error.message;
   }
@@ -3375,14 +3970,43 @@ class Handler(BaseHTTPRequestHandler):
         if days is None or days <= 0:
             self.send_json(400, {"ok": False, "error": "bad_days"})
             return
+
+        requested_uuid = str(first_value(data, "uuid", "client_id")).strip()
+        if requested_uuid:
+            try:
+                client_uuid = str(uuid.UUID(requested_uuid))
+            except Exception:
+                self.send_json(400, {"ok": False, "error": "bad_uuid"})
+                return
+        else:
+            client_uuid = str(uuid.uuid4())
+
+        if upstream_enabled():
+            payload = {"name": name, "days": days}
+            if requested_uuid:
+                payload["uuid"] = client_uuid
+            try:
+                upstream_request("POST", "/clients", payload)
+                synced = sync_users_from_upstream()
+                user = find_user_by_name(synced, name)
+                log_action("api_client_create_upstream", f"{name} days={days}")
+                self.send_json(201, {"ok": True, "proxied": True, "client": client_payload(user) if user else None})
+            except Exception as exc:
+                log_action("api_upstream_create_failed", f"{name} {exc}")
+                self.send_json(502, {"ok": False, "error": str(exc)})
+            return
+
         if any(user.get("name") == name for user in users):
             self.send_json(409, {"ok": False, "error": "user_already_exists"})
+            return
+        if any(str(user.get("uuid")) == client_uuid for user in users):
+            self.send_json(409, {"ok": False, "error": "uuid_already_exists"})
             return
 
         current = now_ts()
         user = {
             "name": name,
-            "uuid": str(uuid.uuid4()),
+            "uuid": client_uuid,
             "created_at": current,
             "expires_at": current + days * 86400,
             "banned": False,
@@ -3395,6 +4019,27 @@ class Handler(BaseHTTPRequestHandler):
     def edit_client(self, users, name, data):
         if not validate_name(name):
             self.send_json(400, {"ok": False, "error": "bad_name"})
+            return
+
+        if upstream_enabled():
+            payload = {}
+            for key in ("new_name", "days", "set_days", "expires_at"):
+                value = first_value(data, key)
+                if value != "":
+                    payload[key] = value
+            if not payload:
+                self.send_json(400, {"ok": False, "error": "nothing_to_edit"})
+                return
+            try:
+                upstream_request("PATCH", "/clients/" + urllib.parse.quote(name, safe=""), payload)
+                synced = sync_users_from_upstream()
+                target_name = str(payload.get("new_name") or name)
+                target = find_user_by_name(synced, target_name)
+                log_action("api_client_edit_upstream", f"{name} {payload}")
+                self.send_json(200, {"ok": True, "proxied": True, "client": client_payload(target) if target else None})
+            except Exception as exc:
+                log_action("api_upstream_edit_failed", f"{name} {exc}")
+                self.send_json(502, {"ok": False, "error": str(exc)})
             return
 
         target = None
@@ -3457,6 +4102,19 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": "bad_name"})
             return
 
+        if upstream_enabled():
+            reason = str(first_value(data, "reason", "ban_reason")).strip()
+            try:
+                upstream_request("PATCH", "/clients/" + urllib.parse.quote(name, safe="") + "/ban", {"reason": reason})
+                synced = sync_users_from_upstream()
+                target = find_user_by_name(synced, name)
+                log_action("api_client_ban_upstream", f"{name} {reason}")
+                self.send_json(200, {"ok": True, "proxied": True, "client": client_payload(target) if target else None})
+            except Exception as exc:
+                log_action("api_upstream_ban_failed", f"{name} {exc}")
+                self.send_json(502, {"ok": False, "error": str(exc)})
+            return
+
         target = None
         for user in users:
             if user.get("name") == name:
@@ -3480,6 +4138,18 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(400, {"ok": False, "error": "bad_name"})
             return
 
+        if upstream_enabled():
+            try:
+                upstream_request("PATCH", "/clients/" + urllib.parse.quote(name, safe="") + "/unban", {})
+                synced = sync_users_from_upstream()
+                target = find_user_by_name(synced, name)
+                log_action("api_client_unban_upstream", name)
+                self.send_json(200, {"ok": True, "proxied": True, "client": client_payload(target) if target else None})
+            except Exception as exc:
+                log_action("api_upstream_unban_failed", f"{name} {exc}")
+                self.send_json(502, {"ok": False, "error": str(exc)})
+            return
+
         target = None
         for user in users:
             if user.get("name") == name:
@@ -3501,6 +4171,17 @@ class Handler(BaseHTTPRequestHandler):
     def delete_client(self, users, name):
         if not validate_name(name):
             self.send_json(400, {"ok": False, "error": "bad_name"})
+            return
+
+        if upstream_enabled():
+            try:
+                upstream_request("DELETE", "/clients/" + urllib.parse.quote(name, safe=""))
+                sync_users_from_upstream()
+                log_action("api_client_delete_upstream", name)
+                self.send_json(200, {"ok": True, "proxied": True, "deleted": name})
+            except Exception as exc:
+                log_action("api_upstream_delete_failed", f"{name} {exc}")
+                self.send_json(502, {"ok": False, "error": str(exc)})
             return
 
         new_users = [user for user in users if user.get("name") != name]
@@ -3685,7 +4366,8 @@ stop_sub_process() {
 
 start_sub_process() {
     local SUB_BIND_PORT="$1"
-    local TOKEN WS_PUBLIC_PORT_VALUE RUNNING_PORT REALITY_ENABLED_VALUE REALITY_PUBLIC_HOST_VALUE
+    local TOKEN WS_PUBLIC_PORT_VALUE RUNNING_PORT REALITY_ENABLED_VALUE REALITY_PUBLIC_HOST_VALUE NODE_NAME_VALUE
+    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE
 
     if ! validate_port "$SUB_BIND_PORT"; then
         echo "usage: vpn sub PORT"
@@ -3713,9 +4395,22 @@ start_sub_process() {
     TOKEN="$(get_sub_token)"
     WS_PUBLIC_PORT_VALUE="$(get_public_port)"
     NODE_NAME_VALUE="$(get_node_name)"
+    SUB_NAME_VALUE="$(get_sub_name)"
+    CDN_WS_ENABLED_VALUE="0"
+    CDN_WS_HOST_VALUE=""
+    CDN_WS_SNI_VALUE=""
+    CDN_WS_PORT_VALUE=""
+    CDN_WS_TAG_VALUE=""
+    if is_cdn_ws_enabled; then
+        CDN_WS_ENABLED_VALUE="1"
+        CDN_WS_HOST_VALUE="$(get_cdn_ws_host)"
+        CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
+        CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
+        CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+    fi
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
-    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY' &
 import base64
 import datetime
 import html
@@ -3742,6 +4437,12 @@ REALITY_PUBLIC_HOST = sys.argv[12]
 PEERS_FILE = sys.argv[13]
 UPSTREAM_API_URL_FILE = sys.argv[14]
 UPSTREAM_API_TOKEN_FILE = sys.argv[15]
+SUB_NAME = sys.argv[16].strip()
+CDN_WS_ENABLED = sys.argv[17] == "1"
+CDN_WS_HOST = sys.argv[18]
+CDN_WS_SNI = sys.argv[19] or CDN_WS_HOST
+CDN_WS_PORT = sys.argv[20] or "443"
+CDN_WS_TAG = sys.argv[21] or "CDN"
 LAST_ON_DEMAND_SYNC = 0
 
 
@@ -3971,24 +4672,32 @@ def make_links(user):
             f"?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         )
     links = [ws]
-    if not REALITY_ENABLED:
-        return links
-
-    reality_tag = urllib.parse.quote(f"{node_name()} Reality", safe="")
-    reality = (
-        f"vless://{client_id}@{reality_host}:{reality_public_port}"
-        f"?type=tcp&security=reality&pbk={reality_public_key}&fp=chrome"
-        f"&sni={reality_sni}&sid={reality_short_id}&spx=%2F"
-        f"&flow=xtls-rprx-vision&encryption=none#{reality_tag}"
-    )
-    links.append(reality)
+    if CDN_WS_ENABLED and CDN_WS_HOST:
+        cdn_tag = urllib.parse.quote(f"{node_name()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
+        links.append(
+            f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
+            f"?security=tls&sni={CDN_WS_SNI}&type=ws&path=/xray"
+            f"&host={CDN_WS_SNI}&encryption=none#{cdn_tag}"
+        )
+    if REALITY_ENABLED:
+        reality_tag = urllib.parse.quote(f"{node_name()} Reality", safe="")
+        reality = (
+            f"vless://{client_id}@{reality_host}:{reality_public_port}"
+            f"?type=tcp&security=reality&pbk={reality_public_key}&fp=chrome"
+            f"&sni={reality_sni}&sid={reality_short_id}&spx=%2F"
+            f"&flow=xtls-rprx-vision&encryption=none#{reality_tag}"
+        )
+        links.append(reality)
     return links
 
 
-def current_subscription_url(identifier, request_host=""):
+def current_subscription_url(identifier, request_host="", include_name=True):
     quoted = urllib.parse.quote(identifier, safe="")
     host = request_host or f"{read_domain()}:{SUB_PORT}"
-    return f"http://{host}/sub/{quoted}"
+    url = f"http://{host}/sub/{quoted}"
+    if include_name and SUB_NAME:
+        url += "#" + urllib.parse.quote(SUB_NAME, safe="")
+    return url
 
 
 def link_name(parsed, params):
@@ -4115,10 +4824,11 @@ def render_sing_box_config(links):
 
 def render_client_page(user, links, request_host=""):
     identifier = str(user.get("uuid", ""))
-    sub_url = current_subscription_url(identifier, request_host)
-    raw_url = sub_url + "/raw"
-    clash_url = sub_url + "/clash"
-    sing_url = sub_url + "/sing-box"
+    base_url = current_subscription_url(identifier, request_host, include_name=False)
+    sub_url = current_subscription_url(identifier, request_host, include_name=True)
+    raw_url = base_url + "/raw"
+    clash_url = base_url + "/clash"
+    sing_url = base_url + "/sing-box"
     qr_src = "https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=" + urllib.parse.quote(sub_url, safe="")
     rows = "\n".join(
         f"<li><button data-copy=\"{html.escape(link, quote=True)}\">Copy</button><code>{html.escape(link)}</code></li>"
@@ -4182,6 +4892,10 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Headers", "authorization,content-type")
         self.send_header("Access-Control-Allow-Methods", "GET,OPTIONS")
+        if SUB_NAME:
+            encoded_name = base64.b64encode(SUB_NAME.encode("utf-8")).decode("ascii")
+            self.send_header("profile-title", "base64:" + encoded_name)
+            self.send_header("Profile-Title", "base64:" + encoded_name)
         super().end_headers()
 
     def log_message(self, fmt, *args):
@@ -4272,9 +4986,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if mode == "json":
             expires_at = int(user.get("expires_at", 0))
+            reality_links = [link for link in local_links if "security=reality" in link]
+            cdn_links = [link for link in local_links if CDN_WS_ENABLED and CDN_WS_HOST and f"@{CDN_WS_HOST}:" in link]
             self.send_json(200, {
                 "ok": True,
                 "name": user.get("name"),
+                "subscription_name": SUB_NAME,
                 "expires_at": expires_at,
                 "expires": datetime.datetime.fromtimestamp(expires_at).strftime("%Y-%m-%d %H:%M"),
                 "links": {
@@ -4282,7 +4999,8 @@ class Handler(BaseHTTPRequestHandler):
                     "peers": peer_links,
                     "all": links,
                     "ws": local_links[0] if local_links else "",
-                    **({"reality": local_links[1]} if len(local_links) > 1 else {}),
+                    **({"ws_cdn": cdn_links[0]} if cdn_links else {}),
+                    **({"reality": reality_links[0]} if reality_links else {}),
                 },
             })
             return
@@ -4331,7 +5049,7 @@ PY
 
 cmd_sub() {
     local ACTION="${1:-}"
-    local RESTART_PORT
+    local RESTART_PORT NAME_VALUE
 
     if validate_port "$ACTION"; then
         start_sub_process "$ACTION"
@@ -4365,6 +5083,30 @@ cmd_sub() {
             else
                 echo "subscription stopped"
             fi
+            NAME_VALUE="$(get_sub_name)"
+            echo "display name: ${NAME_VALUE:-not set}"
+            ;;
+        name|title|rename)
+            shift
+            NAME_VALUE="$(strip_outer_quotes "$*")"
+            case "$NAME_VALUE" in
+                ""|off|disable|disabled|none|clear)
+                    rm -f "$SUB_NAME_FILE" >/dev/null 2>&1
+                    sync_keys_file >/dev/null 2>&1
+                    restart_api_if_running
+                    restart_sub_if_running
+                    log_action "sub_name_clear" ""
+                    echo "subscription display name cleared"
+                    ;;
+                *)
+                    printf '%s\n' "$NAME_VALUE" > "$SUB_NAME_FILE"
+                    sync_keys_file >/dev/null 2>&1
+                    restart_api_if_running
+                    restart_sub_if_running
+                    log_action "sub_name_set" "$NAME_VALUE"
+                    echo "subscription display name saved: $NAME_VALUE"
+                    ;;
+            esac
             ;;
         token)
             echo "legacy token for old /sub/NAME?token=... links:"
@@ -4386,6 +5128,8 @@ cmd_sub() {
             echo "vpn sub stop            stop subscription server"
             echo "vpn sub restart [PORT]  restart subscription server"
             echo "vpn sub status          show status"
+            echo "vpn sub name NAME       set profile/subscription display name"
+            echo "vpn sub name off        clear profile/subscription display name"
             echo "vpn sub token           show legacy subscription token"
             echo "vpn sub url NAME        show subscription URL"
             print_line
@@ -4507,13 +5251,13 @@ PY
             ;;
         del|delete|remove)
             NAME="$(strip_outer_quotes "$NAME")"
-            if ! validate_name "$NAME"; then
-                echo "usage: vpn peer del NAME"
+            if [ -z "$NAME" ]; then
+                echo "usage: vpn peer del NAME_OR_URL"
                 return 0
             fi
             python3 - "$PEERS_FILE" "$NAME" <<'PY'
 import os, sys
-path, name = sys.argv[1], sys.argv[2]
+path, target = sys.argv[1], sys.argv[2]
 
 def strip_outer_quotes(value):
     text = str(value or "").strip()
@@ -4521,16 +5265,24 @@ def strip_outer_quotes(value):
         return text[1:-1].strip()
     return text
 
-name = strip_outer_quotes(name)
+target = strip_outer_quotes(target)
 try:
     with open(path, "r", encoding="utf-8") as f:
         rows = [line.rstrip("\n") for line in f]
 except Exception:
     rows = []
-rows = [row for row in rows if not row.startswith(name + "|")]
+kept = []
+for row in rows:
+    if "|" in row:
+        name, url = row.split("|", 1)
+        if strip_outer_quotes(name) == target or strip_outer_quotes(url) == target:
+            continue
+    elif strip_outer_quotes(row) == target:
+        continue
+    kept.append(row)
 tmp = f"{path}.tmp.{os.getpid()}"
 with open(tmp, "w", encoding="utf-8") as f:
-    for row in rows:
+    for row in kept:
         if row.strip():
             f.write(row + "\n")
 os.replace(tmp, path)
@@ -4542,7 +5294,7 @@ PY
         help|*)
             echo "vpn peer list"
             echo "vpn peer add NAME http://IP:PORT/sub/{uuid}/local"
-            echo "vpn peer del NAME"
+            echo "vpn peer del NAME_OR_URL"
             ;;
     esac
 
@@ -4551,6 +5303,240 @@ PY
 
 upstream_configured() {
     [ -f "$UPSTREAM_API_URL_FILE" ] && [ -s "$UPSTREAM_API_URL_FILE" ] && [ -f "$UPSTREAM_API_TOKEN_FILE" ] && [ -s "$UPSTREAM_API_TOKEN_FILE" ]
+}
+
+local_user_uuid() {
+    local NAME="$1"
+    python3 - "$USERS_FILE" "$NAME" <<'PY'
+import json
+import sys
+
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path, "r", encoding="utf-8") as f:
+        users = json.load(f)
+except Exception:
+    users = []
+
+for user in users if isinstance(users, list) else []:
+    if isinstance(user, dict) and user.get("name") == name and user.get("uuid"):
+        print(str(user.get("uuid")))
+        break
+PY
+}
+
+forward_client_to_upstream() {
+    local ACTION="$1"
+    shift
+
+    if ! upstream_configured; then
+        return 1
+    fi
+
+    python3 - "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$ACTION" "$@" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+url_file, token_file, action = sys.argv[1:4]
+args = sys.argv[4:]
+
+def read_first(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return ""
+
+base_url = read_first(url_file).rstrip("/")
+token = read_first(token_file)
+if not base_url or not token:
+    raise SystemExit("upstream is not configured")
+
+method = "GET"
+path = "/clients"
+payload = None
+
+if action == "create":
+    if len(args) < 2:
+        raise SystemExit("create requires NAME DAYS")
+    method = "POST"
+    payload = {"name": args[0], "days": int(args[1])}
+    if len(args) > 2 and args[2]:
+        payload["uuid"] = args[2]
+elif action == "renew":
+    if len(args) < 2:
+        raise SystemExit("renew requires NAME DAYS")
+    method = "PATCH"
+    path = "/clients/" + urllib.parse.quote(args[0], safe="")
+    payload = {"days": int(args[1])}
+elif action == "delete":
+    if len(args) < 1:
+        raise SystemExit("delete requires NAME")
+    method = "DELETE"
+    path = "/clients/" + urllib.parse.quote(args[0], safe="")
+elif action == "ban":
+    if len(args) < 1:
+        raise SystemExit("ban requires NAME")
+    method = "PATCH"
+    path = "/clients/" + urllib.parse.quote(args[0], safe="") + "/ban"
+    payload = {"reason": args[1] if len(args) > 1 else ""}
+elif action == "unban":
+    if len(args) < 1:
+        raise SystemExit("unban requires NAME")
+    method = "PATCH"
+    path = "/clients/" + urllib.parse.quote(args[0], safe="") + "/unban"
+    payload = {}
+else:
+    raise SystemExit(f"unknown upstream action: {action}")
+
+body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+req = urllib.request.Request(
+    base_url + path,
+    data=body,
+    method=method,
+    headers={
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+        "User-Agent": "H1CloudVPNUpstreamWrite/1.0",
+    },
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=12) as resp:
+        text = resp.read(1024 * 1024).decode("utf-8", "ignore")
+except urllib.error.HTTPError as exc:
+    text = exc.read().decode("utf-8", "ignore")
+    try:
+        detail = json.loads(text).get("error") or text
+    except Exception:
+        detail = text or exc.reason
+    raise SystemExit(f"HTTP {exc.code}: {detail}")
+
+try:
+    data = json.loads(text) if text else {}
+except Exception:
+    data = {}
+
+if data and data.get("ok") is False:
+    raise SystemExit(data.get("error", "upstream_failed"))
+
+print(f"upstream {action} ok")
+PY
+}
+
+sync_after_upstream_client_write() {
+    local NAME="$1"
+    local SHOW_LINK="${2:-}"
+
+    sync_upstream_tick manual
+    sync_keys_file >/dev/null 2>&1
+    restart_api_if_running
+    restart_sub_if_running
+
+    if [ "$SHOW_LINK" = "link" ]; then
+        echo "link:"
+        make_link "$NAME" || true
+    fi
+
+    return 0
+}
+
+push_local_users_to_upstream() {
+    if ! upstream_configured; then
+        return 1
+    fi
+
+    python3 - "$USERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" <<'PY'
+import json
+import math
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+users_file, url_file, token_file = sys.argv[1:4]
+
+def read_first(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return ""
+
+def load_local_users():
+    try:
+        with open(users_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, list) else []
+    except Exception:
+        return []
+
+base_url = read_first(url_file).rstrip("/")
+token = read_first(token_file)
+if not base_url or not token:
+    raise SystemExit(1)
+
+def request(method, path, payload=None):
+    body = None if payload is None else json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "User-Agent": "H1CloudVPNLocalUserPush/1.0",
+    }
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        text = resp.read(1024 * 1024).decode("utf-8", "ignore")
+    return json.loads(text) if text else {}
+
+try:
+    payload = request("GET", "/clients")
+except Exception as exc:
+    raise SystemExit(f"upstream read failed: {exc}")
+
+upstream_clients = payload.get("clients", [])
+if not isinstance(upstream_clients, list):
+    raise SystemExit("bad upstream response")
+
+upstream_names = {str(item.get("name", "")) for item in upstream_clients if isinstance(item, dict)}
+upstream_uuids = {str(item.get("uuid", "")) for item in upstream_clients if isinstance(item, dict)}
+now = int(time.time())
+pushed = []
+
+for user in load_local_users():
+    if not isinstance(user, dict):
+        continue
+    name = str(user.get("name", "")).strip()
+    client_id = str(user.get("uuid", "")).strip()
+    try:
+        expires_at = int(user.get("expires_at", 0))
+    except Exception:
+        continue
+    if not name or not client_id or expires_at <= now:
+        continue
+    if name in upstream_names or client_id in upstream_uuids:
+        continue
+    days = max(1, int(math.ceil((expires_at - now) / 86400)))
+    body = {"name": name, "days": days, "uuid": client_id}
+    try:
+        request("POST", "/clients", body)
+        pushed.append(name)
+        upstream_names.add(name)
+        upstream_uuids.add(client_id)
+    except urllib.error.HTTPError as exc:
+        if exc.code != 409:
+            detail = exc.read().decode("utf-8", "ignore")
+            print(f"push failed for {name}: HTTP {exc.code} {detail}")
+    except Exception as exc:
+        print(f"push failed for {name}: {exc}")
+
+if pushed:
+    print("local users pushed to upstream: " + ", ".join(pushed))
+PY
 }
 
 sync_upstream_users() {
@@ -4614,13 +5600,21 @@ PY
 }
 
 sync_upstream_tick() {
-    local MODE="${1:-}" BEFORE AFTER OUT RC
+    local MODE="${1:-}" BEFORE AFTER OUT PUSH_OUT RC
 
     if ! upstream_configured; then
         if [ "$MODE" = "manual" ]; then
             echo "federation sync skipped: upstream disabled"
         fi
         return 0
+    fi
+
+    PUSH_OUT="$(push_local_users_to_upstream 2>&1)"
+    if [ -n "$PUSH_OUT" ]; then
+        log_action "federation_push_local" "$PUSH_OUT"
+        if [ "$MODE" = "manual" ] || echo "$PUSH_OUT" | grep -q "local users pushed"; then
+            echo "$PUSH_OUT"
+        fi
     fi
 
     BEFORE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
@@ -4796,7 +5790,7 @@ except Exception:
 print(f"joined master: {upstream_url}")
 print(f"peer url sent: {sub_url}")
 PY
-)" 
+)"
     if [ "$?" -ne 0 ]; then
         echo "join failed:"
         echo "$OUT"
@@ -4819,7 +5813,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -4863,8 +5857,9 @@ import zipfile
 backup, data_dir = sys.argv[1], sys.argv[2]
 allowed = {
     "users.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
-    "api_token.txt", "sub_token.txt", "peers.txt", "nodes.json", "join_token.txt",
+    "api_token.txt", "sub_token.txt", "sub_name.txt", "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
+    "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt",
     "reality_enabled.txt", "reality_private_key.txt", "reality_public_key.txt",
     "reality_short_id.txt", "reality_sni.txt", "reality_dest.txt",
     "reality_port.txt", "reality_public_port.txt", "public_ip.txt",
@@ -5329,7 +6324,7 @@ cmd_ports() {
 
     print_line
     echo "minimum allocations for this config: $REQUIRED"
-    echo "fresh default autostarts ws/reality/api/sub; reality uses domain and its allocated port."
+    echo "fresh default autostarts ws/reality/api/sub."
     print_line
     return 0
 }
@@ -5453,6 +6448,10 @@ handle_cmd() {
             shift
             cmd_node "$*"
             ;;
+        cdn|ws-cdn|manual)
+            shift
+            cmd_cdn "$@"
+            ;;
         join-token)
             cmd_join_token
             ;;
@@ -5498,7 +6497,8 @@ handle_cmd() {
             cmd_api "${2:-}" "${3:-}" "${4:-}"
             ;;
         sub|subscription)
-            cmd_sub "${2:-}" "${3:-}" "${4:-}"
+            shift
+            cmd_sub "$@"
             ;;
         restart)
             restart_xray || true
