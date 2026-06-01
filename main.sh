@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.01-cdn-ws"
+SCRIPT_VERSION="2026.06.01-limits"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -14,6 +14,8 @@ blank() {
 XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 DATA_DIR="."
 USERS_FILE="$DATA_DIR/users.json"
+DEVICES_FILE="$DATA_DIR/devices.json"
+TRAFFIC_FILE="$DATA_DIR/traffic.json"
 DOMAIN_FILE="$DATA_DIR/domain.txt"
 CONFIG_FILE="$DATA_DIR/config.json"
 KEY_FILE="$DATA_DIR/key.txt"
@@ -56,6 +58,7 @@ API_PID=""
 SUB_PID=""
 USERS_STATE=""
 CHECK_INTERVAL=300
+LIMIT_CHECK_INTERVAL=60
 FEDERATION_SYNC_INTERVAL=2
 UPDATE_CHECK_INTERVAL=3600
 LAST_UPDATE_CHECK=0
@@ -84,6 +87,14 @@ init_files() {
 
     if [ ! -f "$NODES_FILE" ]; then
         echo "[]" > "$NODES_FILE"
+    fi
+
+    if [ ! -f "$DEVICES_FILE" ]; then
+        echo "{}" > "$DEVICES_FILE"
+    fi
+
+    if [ ! -f "$TRAFFIC_FILE" ]; then
+        echo "{}" > "$TRAFFIC_FILE"
     fi
 
     mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
@@ -1114,7 +1125,7 @@ sync_keys_file() {
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY'
+    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$TRAFFIC_FILE" <<'PY'
 import datetime
 import json
 import sys
@@ -1141,6 +1152,7 @@ cdn_ws_host = sys.argv[17]
 cdn_ws_sni = sys.argv[18] or cdn_ws_host
 cdn_ws_port = sys.argv[19] or "443"
 cdn_ws_tag_suffix = sys.argv[20] or "CDN"
+traffic_file = sys.argv[21]
 now = int(time.time())
 
 try:
@@ -1150,6 +1162,14 @@ try:
         users = []
 except Exception:
     users = []
+
+try:
+    with open(traffic_file, "r", encoding="utf-8") as f:
+        traffic = json.load(f)
+    if not isinstance(traffic, dict):
+        traffic = {}
+except Exception:
+    traffic = {}
 
 lines = []
 generated = datetime.datetime.fromtimestamp(now).strftime("%Y-%m-%d %H:%M:%S")
@@ -1207,6 +1227,16 @@ def subscription_url(name, uuid):
         url += "#" + urllib.parse.quote(sub_name, safe="")
     return url
 
+def gb_text(value):
+    try:
+        return f"{int(value) / 1073741824:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
+
+def traffic_row(uuid):
+    row = traffic.get(uuid, {})
+    return row if isinstance(row, dict) else {}
+
 active_count = 0
 listed_count = 0
 for u in users:
@@ -1236,6 +1266,16 @@ for u in users:
 
     active_count += 1
     lines.append(f"{name} | uuid: {uuid} | expires: {date} | left: {days_left}d {hours_left}h")
+    limit_bytes = int(u.get("traffic_limit_bytes", 0) or 0)
+    device_limit = int(u.get("device_limit", 0) or 0)
+    traffic_used = int(traffic_row(uuid).get("used_bytes", 0) or 0)
+    if limit_bytes or device_limit:
+        parts = []
+        if limit_bytes:
+            parts.append(f"traffic: {gb_text(traffic_used)}GB/{gb_text(limit_bytes)}GB")
+        if device_limit:
+            parts.append(f"devices: max {device_limit}")
+        lines.append("limits: " + " | ".join(parts))
     lines.append("ws:")
     lines.append(ws_link(name, uuid))
     if cdn_ws_enabled:
@@ -1668,12 +1708,14 @@ cmd_help() {
     print_line
     echo "vpn help                  show commands"
     echo "vpn add NAME DAYS          add user for DAYS"
+    echo "vpn add NAME DAYS GB DEV   add user with traffic/device limits"
     echo "vpn del NAME               delete user"
     echo "vpn ban NAME [REASON]      disable user without deleting"
     echo "vpn unban NAME             enable banned user"
     echo "vpn list                   show users"
     echo "vpn info NAME              show user info"
     echo "vpn link NAME              show user link"
+    echo "vpn limit NAME ...         set traffic GB and device limits"
     echo "vpn keys                   show all keys and recent logs"
     echo "vpn logs [COUNT]           show action logs"
     echo "vpn node NAME              set node/location name for link tags"
@@ -1706,7 +1748,11 @@ cmd_help() {
     print_line
     echo "examples:"
     echo "vpn add test 30"
+    echo "vpn add test 30 100 3"
     echo "vpn link test"
+    echo "vpn limit test 100 3"
+    echo "vpn limit test traffic 50"
+    echo "vpn limit test devices 2"
     echo "vpn ban test abuse"
     echo "vpn unban test"
     echo "vpn node Germany"
@@ -1731,6 +1777,8 @@ cmd_help() {
 cmd_add() {
     NAME="$1"
     DAYS="$2"
+    LIMIT_GB="${3:-}"
+    DEVICE_LIMIT_VALUE="${4:-}"
 
     if ! validate_name "$NAME"; then
         echo "bad user name. use only: a-z A-Z 0-9 . _ -"
@@ -1747,7 +1795,7 @@ cmd_add() {
     if upstream_configured; then
         EXISTING_UUID="$(local_user_uuid "$NAME" 2>/dev/null)"
         echo "federation upstream enabled: creating user on master..."
-        if forward_client_to_upstream create "$NAME" "$DAYS" "$EXISTING_UUID"; then
+        if forward_client_to_upstream create "$NAME" "$DAYS" "$EXISTING_UUID" "$LIMIT_GB" "$DEVICE_LIMIT_VALUE"; then
             sync_after_upstream_client_write "$NAME" link
         else
             echo "upstream create failed"
@@ -1763,13 +1811,44 @@ cmd_add() {
         return 0
     fi
 
-    python3 - "$USERS_FILE" "$NAME" "$DAYS" "$UUID" <<'PY'
+    python3 - "$USERS_FILE" "$NAME" "$DAYS" "$UUID" "$LIMIT_GB" "$DEVICE_LIMIT_VALUE" <<'PY'
 import json, sys, time
+from decimal import Decimal, InvalidOperation
 
 path = sys.argv[1]
 name = sys.argv[2]
 days = int(sys.argv[3])
 uuid = sys.argv[4]
+limit_gb = sys.argv[5].strip()
+device_limit_raw = sys.argv[6].strip()
+
+def parse_limit_gb(value):
+    text = str(value or "").strip().lower()
+    if not text or text in ("0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        gb = Decimal(text.replace(",", "."))
+    except InvalidOperation:
+        print("bad GB limit")
+        sys.exit(2)
+    if gb < 0:
+        print("bad GB limit")
+        sys.exit(2)
+    return int(gb * Decimal(1073741824))
+
+def parse_device_limit(value):
+    text = str(value or "").strip().lower()
+    if not text or text in ("0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        number = int(text)
+    except Exception:
+        print("bad device limit")
+        sys.exit(2)
+    if number < 0:
+        print("bad device limit")
+        sys.exit(2)
+    return number
 
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -1787,13 +1866,23 @@ for u in users:
 now = int(time.time())
 expires_at = now + days * 86400
 
-users.append({
+traffic_limit_bytes = parse_limit_gb(limit_gb)
+device_limit = parse_device_limit(device_limit_raw)
+
+user = {
     "name": name,
     "uuid": uuid,
     "created_at": now,
     "expires_at": expires_at,
     "banned": False
-})
+}
+if traffic_limit_bytes:
+    user["traffic_limit_bytes"] = traffic_limit_bytes
+    user["traffic_reset_pending"] = True
+if device_limit:
+    user["device_limit"] = device_limit
+
+users.append(user)
 
 with open(path, "w", encoding="utf-8") as f:
     json.dump(users, f, ensure_ascii=False, indent=2)
@@ -1835,11 +1924,13 @@ cmd_del() {
         return 0
     fi
 
-    python3 - "$USERS_FILE" "$NAME" <<'PY'
-import json, sys
+    python3 - "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$NAME" <<'PY'
+import json, os, sys
 
 path = sys.argv[1]
-name = sys.argv[2]
+devices_file = sys.argv[2]
+traffic_file = sys.argv[3]
+name = sys.argv[4]
 
 try:
     with open(path, "r", encoding="utf-8") as f:
@@ -1849,6 +1940,7 @@ try:
 except Exception:
     users = []
 
+removed_ids = [str(u.get("uuid", "")) for u in users if u.get("name") == name]
 new_users = [u for u in users if u.get("name") != name]
 
 if len(new_users) == len(users):
@@ -1857,6 +1949,28 @@ if len(new_users) == len(users):
 
 with open(path, "w", encoding="utf-8") as f:
     json.dump(new_users, f, ensure_ascii=False, indent=2)
+
+def cleanup_json_map(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    changed = False
+    for client_id in removed_ids:
+        if client_id in data:
+            data.pop(client_id, None)
+            changed = True
+    if changed:
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, path)
+
+cleanup_json_map(devices_file)
+cleanup_json_map(traffic_file)
 
 print("user deleted")
 PY
@@ -2011,10 +2125,12 @@ PY
 cmd_list() {
     prune_expired >/dev/null 2>&1
 
-    python3 - "$USERS_FILE" <<'PY'
+    python3 - "$USERS_FILE" "$TRAFFIC_FILE" "$DEVICES_FILE" <<'PY'
 import json, sys, time, datetime
 
 path = sys.argv[1]
+traffic_file = sys.argv[2]
+devices_file = sys.argv[3]
 now = int(time.time())
 
 try:
@@ -2024,6 +2140,28 @@ try:
         users = []
 except Exception:
     users = []
+
+try:
+    with open(traffic_file, "r", encoding="utf-8") as f:
+        traffic = json.load(f)
+    if not isinstance(traffic, dict):
+        traffic = {}
+except Exception:
+    traffic = {}
+
+try:
+    with open(devices_file, "r", encoding="utf-8") as f:
+        devices = json.load(f)
+    if not isinstance(devices, dict):
+        devices = {}
+except Exception:
+    devices = {}
+
+def gb_text(value):
+    try:
+        return f"{int(value) / 1073741824:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
 
 if not users:
     print("no users")
@@ -2037,7 +2175,18 @@ for u in users:
         hours_left = (seconds_left % 86400) // 3600
         date = datetime.datetime.fromtimestamp(exp).strftime("%Y-%m-%d %H:%M")
         status = "banned" if u.get("banned") or u.get("disabled") else "active"
-        print(f"{u['name']} | uuid: {u['uuid']} | status: {status} | expires: {date} | left: {days_left}d {hours_left}h")
+        uuid = str(u.get("uuid", ""))
+        used = int((traffic.get(uuid, {}) or {}).get("used_bytes", 0) or 0)
+        traffic_limit = int(u.get("traffic_limit_bytes", 0) or 0)
+        device_limit = int(u.get("device_limit", 0) or 0)
+        device_count = len(devices.get(uuid, []) if isinstance(devices.get(uuid, []), list) else [])
+        limits = []
+        if traffic_limit:
+            limits.append(f"traffic {gb_text(used)}/{gb_text(traffic_limit)}GB")
+        if device_limit:
+            limits.append(f"devices {device_count}/{device_limit}")
+        suffix = " | " + " | ".join(limits) if limits else ""
+        print(f"{u['name']} | uuid: {uuid} | status: {status} | expires: {date} | left: {days_left}d {hours_left}h{suffix}")
     except Exception:
         pass
 PY
@@ -2055,14 +2204,16 @@ cmd_info() {
 
     prune_expired >/dev/null 2>&1
 
-    python3 - "$USERS_FILE" "$NAME" <<'PY'
+    python3 - "$USERS_FILE" "$TRAFFIC_FILE" "$DEVICES_FILE" "$NAME" <<'PY'
 import datetime
 import json
 import sys
 import time
 
 path = sys.argv[1]
-name = sys.argv[2]
+traffic_file = sys.argv[2]
+devices_file = sys.argv[3]
+name = sys.argv[4]
 now = int(time.time())
 
 try:
@@ -2072,6 +2223,28 @@ try:
         users = []
 except Exception:
     users = []
+
+try:
+    with open(traffic_file, "r", encoding="utf-8") as f:
+        traffic = json.load(f)
+    if not isinstance(traffic, dict):
+        traffic = {}
+except Exception:
+    traffic = {}
+
+try:
+    with open(devices_file, "r", encoding="utf-8") as f:
+        devices = json.load(f)
+    if not isinstance(devices, dict):
+        devices = {}
+except Exception:
+    devices = {}
+
+def gb_text(value):
+    try:
+        return f"{int(value) / 1073741824:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
 
 for u in users:
     if u.get("name") == name:
@@ -2086,6 +2259,14 @@ for u in users:
         print(f"status: {status}")
         if status == "banned" and u.get("ban_reason"):
             print(f"ban_reason: {u.get('ban_reason')}")
+        uuid = str(u.get("uuid", ""))
+        traffic_row = traffic.get(uuid, {}) if isinstance(traffic.get(uuid, {}), dict) else {}
+        device_rows = devices.get(uuid, []) if isinstance(devices.get(uuid, []), list) else []
+        traffic_limit = int(u.get("traffic_limit_bytes", 0) or 0)
+        device_limit = int(u.get("device_limit", 0) or 0)
+        used = int(traffic_row.get("used_bytes", 0) or 0)
+        print(f"traffic: {gb_text(used)}GB / {gb_text(traffic_limit)}GB" if traffic_limit else f"traffic: {gb_text(used)}GB / unlimited")
+        print(f"devices: {len(device_rows)} / {device_limit}" if device_limit else f"devices: {len(device_rows)} / unlimited")
         print(f"created_at: {datetime.datetime.fromtimestamp(int(u.get('created_at', 0))).strftime('%Y-%m-%d %H:%M')}")
         print(f"expires: {date}")
         print(f"left: {days_left}d {hours_left}h")
@@ -2204,6 +2385,181 @@ PY
         sync_keys_file >/dev/null 2>&1
         remember_users_state
         log_action "client_renew" "$NAME days=$DAYS"
+    fi
+
+    return 0
+}
+
+cmd_limit() {
+    local NAME="$1"
+    local ACTION="${2:-status}"
+    local VALUE="${3:-}"
+    local VALUE2="${4:-}"
+
+    if ! validate_name "$NAME"; then
+        echo "usage: vpn limit NAME [GB DEVICES|traffic GB|devices COUNT|off|reset-traffic|reset-devices|status]"
+        return 0
+    fi
+
+    if upstream_configured; then
+        case "$ACTION" in
+            status|show|reset-traffic|traffic-reset|reset|reset-devices|devices-reset|clear-devices|"")
+                ;;
+            *)
+                echo "federation upstream enabled: updating limits on master..."
+                if forward_client_to_upstream limit "$NAME" "$ACTION" "$VALUE" "$VALUE2"; then
+                    sync_after_upstream_client_write "$NAME"
+                else
+                    echo "upstream limit update failed"
+                fi
+                return 0
+                ;;
+        esac
+    fi
+
+    python3 - "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$NAME" "$ACTION" "$VALUE" "$VALUE2" <<'PY'
+import json
+import os
+import sys
+import time
+from decimal import Decimal, InvalidOperation
+
+users_file, devices_file, traffic_file, name, action, value, value2 = sys.argv[1:8]
+action = (action or "status").strip().lower()
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, type(default)) else default
+    except Exception:
+        return default
+
+def save_json(path, data):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+def parse_limit_gb(raw):
+    text = str(raw or "").strip().lower()
+    if text in ("", "0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        gb = Decimal(text.replace(",", "."))
+    except InvalidOperation:
+        raise ValueError("bad traffic GB limit")
+    if gb < 0:
+        raise ValueError("bad traffic GB limit")
+    return int(gb * Decimal(1073741824))
+
+def parse_device_limit(raw):
+    text = str(raw or "").strip().lower()
+    if text in ("", "0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        count = int(text)
+    except Exception:
+        raise ValueError("bad device limit")
+    if count < 0:
+        raise ValueError("bad device limit")
+    return count
+
+def gb_text(bytes_value):
+    try:
+        return f"{int(bytes_value) / 1073741824:.2f}".rstrip("0").rstrip(".")
+    except Exception:
+        return "0"
+
+users = load_json(users_file, [])
+target = None
+for user in users:
+    if isinstance(user, dict) and user.get("name") == name:
+        target = user
+        break
+
+if target is None:
+    print("user not found")
+    sys.exit(2)
+
+devices = load_json(devices_file, {})
+traffic = load_json(traffic_file, {})
+client_id = str(target.get("uuid", ""))
+traffic_row = traffic.get(client_id, {}) if isinstance(traffic.get(client_id, {}), dict) else {}
+devices_list = devices.get(client_id, []) if isinstance(devices.get(client_id, []), list) else []
+changed_users = False
+changed_devices = False
+changed_traffic = False
+
+try:
+    if action in ("status", "show", ""):
+        pass
+    elif action in ("off", "disable", "clear", "none"):
+        target.pop("traffic_limit_bytes", None)
+        target.pop("traffic_reset_pending", None)
+        target.pop("device_limit", None)
+        target.pop("quota_exceeded_at", None)
+        changed_users = True
+    elif action in ("traffic", "gb", "quota"):
+        target["traffic_limit_bytes"] = parse_limit_gb(value)
+        target["traffic_reset_pending"] = True
+        target.pop("quota_exceeded_at", None)
+        changed_users = True
+    elif action in ("devices", "device", "hwid"):
+        target["device_limit"] = parse_device_limit(value)
+        changed_users = True
+    elif action in ("reset-traffic", "traffic-reset", "reset"):
+        traffic[client_id] = {"used_bytes": 0, "last_counter_bytes": int(traffic_row.get("last_counter_bytes", 0) or 0), "reset_pending": True, "updated_at": int(time.time())}
+        target["traffic_reset_pending"] = True
+        target.pop("quota_exceeded_at", None)
+        changed_users = True
+        changed_traffic = True
+    elif action in ("reset-devices", "devices-reset", "clear-devices"):
+        devices.pop(client_id, None)
+        changed_devices = True
+    else:
+        target["traffic_limit_bytes"] = parse_limit_gb(action)
+        target["device_limit"] = parse_device_limit(value)
+        target["traffic_reset_pending"] = True
+        target.pop("quota_exceeded_at", None)
+        changed_users = True
+except ValueError as exc:
+    print(str(exc))
+    sys.exit(2)
+
+if changed_users:
+    save_json(users_file, users)
+if changed_devices:
+    save_json(devices_file, devices)
+if changed_traffic:
+    save_json(traffic_file, traffic)
+
+traffic_row = traffic.get(client_id, {}) if isinstance(traffic.get(client_id, {}), dict) else {}
+devices_list = devices.get(client_id, []) if isinstance(devices.get(client_id, []), list) else []
+limit_bytes = int(target.get("traffic_limit_bytes", 0) or 0)
+device_limit = int(target.get("device_limit", 0) or 0)
+used = int(traffic_row.get("used_bytes", 0) or 0)
+
+print(f"name: {name}")
+print(f"traffic: {gb_text(used)}GB / {gb_text(limit_bytes)}GB" if limit_bytes else f"traffic: {gb_text(used)}GB / unlimited")
+print(f"devices: {len(devices_list)} / {device_limit}" if device_limit else f"devices: {len(devices_list)} / unlimited")
+if devices_list:
+    for item in devices_list:
+        if isinstance(item, dict):
+            label = item.get("label") or item.get("id", "")
+            last_seen = item.get("last_seen", 0)
+            print(f"- {label} last_seen={last_seen}")
+if changed_users or changed_devices or changed_traffic:
+    print("limits saved")
+PY
+
+    RC="$?"
+    if [ "$RC" -eq 0 ]; then
+        sync_keys_file >/dev/null 2>&1
+        remember_users_state
+        restart_api_if_running
+        restart_sub_if_running
+        log_action "client_limit" "$NAME $ACTION $VALUE $VALUE2"
     fi
 
     return 0
@@ -2513,7 +2869,7 @@ start_api_process() {
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
     fi
 
-    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" <<'PY' &
 import datetime
 import hashlib
 import json
@@ -2590,6 +2946,8 @@ CDN_WS_HOST_FILE = sys.argv[53]
 CDN_WS_SNI_FILE = sys.argv[54]
 CDN_WS_PORT_FILE = sys.argv[55]
 CDN_WS_TAG_FILE = sys.argv[56]
+DEVICES_FILE = sys.argv[57]
+TRAFFIC_FILE = sys.argv[58]
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -2714,6 +3072,65 @@ def save_nodes(nodes):
     atomic_json(NODES_FILE, nodes)
 
 
+def load_devices():
+    try:
+        with open(DEVICES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_devices(devices):
+    atomic_json(DEVICES_FILE, devices)
+
+
+def load_traffic():
+    try:
+        with open(TRAFFIC_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_traffic(traffic):
+    atomic_json(TRAFFIC_FILE, traffic)
+
+
+def gb_from_bytes(value):
+    try:
+        return round(int(value) / 1073741824, 3)
+    except Exception:
+        return 0
+
+
+def parse_limit_bytes(value):
+    text = str(value or "").strip().lower()
+    if text in ("", "0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        gb = float(text.replace(",", "."))
+    except Exception:
+        raise ValueError("bad_traffic_limit")
+    if gb < 0:
+        raise ValueError("bad_traffic_limit")
+    return int(gb * 1073741824)
+
+
+def parse_device_limit_value(value):
+    text = str(value or "").strip().lower()
+    if text in ("", "0", "off", "none", "unlimited", "no"):
+        return 0
+    try:
+        count = int(text)
+    except Exception:
+        raise ValueError("bad_device_limit")
+    if count < 0:
+        raise ValueError("bad_device_limit")
+    return count
+
+
 def read_join_token():
     return read_first_line(JOIN_TOKEN_FILE)
 
@@ -2761,7 +3178,7 @@ def nodes_with_health():
 
 def backup_targets():
     names = [
-        USERS_FILE, DOMAIN_FILE, CONFIG_FILE, KEY_FILE, NODE_NAME_FILE, ACTION_LOG_FILE,
+        USERS_FILE, DEVICES_FILE, TRAFFIC_FILE, DOMAIN_FILE, CONFIG_FILE, KEY_FILE, NODE_NAME_FILE, ACTION_LOG_FILE,
         API_TOKEN_FILE, SUB_TOKEN_FILE, PEERS_FILE, NODES_FILE, JOIN_TOKEN_FILE,
         UPSTREAM_API_URL_FILE, UPSTREAM_API_TOKEN_FILE, UPDATE_URL_FILE, AUTO_UPDATE_FILE,
         SUB_NAME_FILE, CDN_WS_ENABLED_FILE, CDN_WS_HOST_FILE, CDN_WS_SNI_FILE,
@@ -2881,7 +3298,7 @@ def sync_users_from_upstream():
             continue
         if not name or not client_id or expires_at <= 0:
             continue
-        users.append({
+        row = {
             "name": name,
             "uuid": client_id,
             "created_at": created_at,
@@ -2889,7 +3306,12 @@ def sync_users_from_upstream():
             "banned": bool(item.get("banned") or item.get("disabled")),
             "banned_at": int(item.get("banned_at", 0) or 0),
             "ban_reason": str(item.get("ban_reason", "") or ""),
-        })
+        }
+        row["traffic_limit_bytes"] = int(item.get("traffic_limit_bytes", 0) or 0)
+        row["device_limit"] = int(item.get("device_limit", 0) or 0)
+        if item.get("traffic_reset_pending"):
+            row["traffic_reset_pending"] = True
+        users.append(row)
 
     save_users(users)
     log_action("api_upstream_sync", f"users={len(users)}")
@@ -3041,9 +3463,19 @@ def client_payload(user):
     banned = bool(user.get("banned") or user.get("disabled"))
     links = {} if banned else make_links(user)
     subscription_url = "" if banned else make_subscription_url(user)
+    client_id = str(user.get("uuid", ""))
+    devices = load_devices().get(client_id, [])
+    if not isinstance(devices, list):
+        devices = []
+    traffic_row = load_traffic().get(client_id, {})
+    if not isinstance(traffic_row, dict):
+        traffic_row = {}
+    traffic_used = int(traffic_row.get("used_bytes", 0) or 0)
+    traffic_limit = int(user.get("traffic_limit_bytes", 0) or 0)
+    device_limit = int(user.get("device_limit", 0) or 0)
     return {
         "name": user.get("name"),
-        "uuid": user.get("uuid"),
+        "uuid": client_id,
         "status": "banned" if banned else "active",
         "banned": banned,
         "banned_at": int(user.get("banned_at", 0) or 0),
@@ -3055,6 +3487,14 @@ def client_payload(user):
         "link": links.get("ws", ""),
         "links": links,
         "subscription_url": subscription_url,
+        "traffic_used_bytes": traffic_used,
+        "traffic_used_gb": gb_from_bytes(traffic_used),
+        "traffic_limit_bytes": traffic_limit,
+        "traffic_limit_gb": gb_from_bytes(traffic_limit),
+        "traffic_left_bytes": max(0, traffic_limit - traffic_used) if traffic_limit else None,
+        "device_limit": device_limit,
+        "devices_count": len(devices),
+        "devices": devices,
     }
 
 
@@ -3208,6 +3648,8 @@ def write_config(users):
 def write_keys(users):
     current = now_ts()
     generated = datetime.datetime.fromtimestamp(current).strftime("%Y-%m-%d %H:%M:%S")
+    traffic = load_traffic()
+    devices = load_devices()
     lines = [
         f"generated_at: {generated}",
         f"domain: {read_domain()}",
@@ -3250,6 +3692,18 @@ def write_keys(users):
                 f"{user['name']} | uuid: {user['uuid']} | expires: {date} | "
                 f"left: {left // 86400}d {(left % 86400) // 3600}h"
             )
+            client_id = str(user.get("uuid", ""))
+            traffic_limit = int(user.get("traffic_limit_bytes", 0) or 0)
+            device_limit = int(user.get("device_limit", 0) or 0)
+            traffic_row = traffic.get(client_id, {}) if isinstance(traffic.get(client_id, {}), dict) else {}
+            device_rows = devices.get(client_id, []) if isinstance(devices.get(client_id, []), list) else []
+            if traffic_limit or device_limit:
+                parts = []
+                if traffic_limit:
+                    parts.append(f"traffic: {gb_from_bytes(int(traffic_row.get('used_bytes', 0) or 0))}GB/{gb_from_bytes(traffic_limit)}GB")
+                if device_limit:
+                    parts.append(f"devices: {len(device_rows)}/{device_limit}")
+                lines.append("limits: " + " | ".join(parts))
             lines.append("ws:")
             lines.append(make_ws_link(user))
             cdn_link = make_cdn_ws_link(user)
@@ -3362,6 +3816,8 @@ def embedded_panel_html():
     <form id="createForm" class="card">
       <label>Name <input id="name" autocomplete="off" placeholder="lol123" /></label>
       <label>Days <input id="days" type="number" min="1" step="1" value="30" /></label>
+      <label>GB <input id="trafficGb" type="number" min="0" step="0.1" placeholder="0 = unlimited" /></label>
+      <label>Devices <input id="deviceLimit" type="number" min="0" step="1" placeholder="0 = unlimited" /></label>
       <button class="primary" type="submit">Create</button>
     </form>
     <table>
@@ -3441,9 +3897,17 @@ function renderClients(clients) {
     const banned = Boolean(client.banned || client.status === "banned");
     const links = client.links || {};
     const name = esc(client.name);
+    const trafficLimit = Number(client.traffic_limit_gb || 0);
+    const trafficUsed = Number(client.traffic_used_gb || 0);
+    const deviceLimit = Number(client.device_limit || 0);
+    const deviceCount = Number(client.devices_count || 0);
+    const limitText = [
+      trafficLimit ? `${trafficUsed.toFixed(2).replace(/\\.?0+$/, "")}/${trafficLimit.toFixed(2).replace(/\\.?0+$/, "")} GB` : "",
+      deviceLimit ? `${deviceCount}/${deviceLimit} devices` : "",
+    ].filter(Boolean).join(" · ");
     return `<tr>
       <td><strong>${name}</strong><br><code>${esc(client.uuid)}</code></td>
-      <td><span class="pill ${banned ? "bad" : "ok"}">${banned ? "banned" : `${client.left_days || 0} days`}</span><br><small>${esc(client.ban_reason || "")}</small></td>
+      <td><span class="pill ${banned ? "bad" : "ok"}">${banned ? "banned" : `${client.left_days || 0} days`}</span><br><small>${esc(limitText || client.ban_reason || "")}</small></td>
       <td><div class="links">${copyButton("WS", links.ws || client.link)}${copyButton("WS-CDN", links.ws_cdn)}${copyButton("Reality", links.reality)}${links.ws || client.link ? `<button data-manual-link="${esc(links.ws || client.link)}">Manual add</button>` : ""}${copyButton("Sub", client.subscription_url)}</div></td>
       <td><div class="actions"><button data-renew="${name}" data-days="30">+30</button>${banned ? `<button data-unban="${name}">Unban</button>` : `<button class="danger" data-ban="${name}">Ban</button>`}<button class="danger" data-delete="${name}">Delete</button></div></td>
     </tr>`;
@@ -3512,8 +3976,15 @@ $("connect").onclick = () => loadAll().catch((error) => $("line").textContent = 
 $("refresh").onclick = $("connect").onclick;
 $("createForm").onsubmit = async (event) => {
   event.preventDefault();
-  await api("/clients", { method: "POST", body: { name: $("name").value.trim(), days: Number($("days").value || 30) } });
+  const body = { name: $("name").value.trim(), days: Number($("days").value || 30) };
+  const trafficGb = Number($("trafficGb").value || 0);
+  const deviceLimit = Number($("deviceLimit").value || 0);
+  if (trafficGb > 0) body.traffic_limit_gb = trafficGb;
+  if (deviceLimit > 0) body.device_limit = deviceLimit;
+  await api("/clients", { method: "POST", body });
   $("name").value = "";
+  $("trafficGb").value = "";
+  $("deviceLimit").value = "";
   await loadAll();
 };
 $("manualForm").onsubmit = async (event) => {
@@ -3963,6 +4434,12 @@ class Handler(BaseHTTPRequestHandler):
     def create_client(self, users, data):
         name = str(first_value(data, "name")).strip()
         days = parse_int(first_value(data, "days"), None)
+        try:
+            traffic_limit = parse_limit_bytes(first_value(data, "traffic_limit_gb", "traffic_gb", "gb", "limit_gb"))
+            device_limit = parse_device_limit_value(first_value(data, "device_limit", "devices", "device_count", "max_devices"))
+        except ValueError as exc:
+            self.send_json(400, {"ok": False, "error": str(exc)})
+            return
 
         if not validate_name(name):
             self.send_json(400, {"ok": False, "error": "bad_name"})
@@ -3985,6 +4462,10 @@ class Handler(BaseHTTPRequestHandler):
             payload = {"name": name, "days": days}
             if requested_uuid:
                 payload["uuid"] = client_uuid
+            if traffic_limit:
+                payload["traffic_limit_gb"] = gb_from_bytes(traffic_limit)
+            if device_limit:
+                payload["device_limit"] = device_limit
             try:
                 upstream_request("POST", "/clients", payload)
                 synced = sync_users_from_upstream()
@@ -4011,6 +4492,11 @@ class Handler(BaseHTTPRequestHandler):
             "expires_at": current + days * 86400,
             "banned": False,
         }
+        if traffic_limit:
+            user["traffic_limit_bytes"] = traffic_limit
+            user["traffic_reset_pending"] = True
+        if device_limit:
+            user["device_limit"] = device_limit
         users.append(user)
         save_users(users)
         log_action("api_client_create", f"{name} days={days}")
@@ -4023,7 +4509,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if upstream_enabled():
             payload = {}
-            for key in ("new_name", "days", "set_days", "expires_at"):
+            for key in ("new_name", "days", "set_days", "expires_at", "traffic_limit_gb", "traffic_gb", "gb", "limit_gb", "device_limit", "devices", "device_count", "max_devices"):
                 value = first_value(data, key)
                 if value != "":
                     payload[key] = value
@@ -4088,6 +4574,28 @@ class Handler(BaseHTTPRequestHandler):
                 return
             target["expires_at"] = expires_at
             changed.append(f"expires_at={expires_at}")
+
+        traffic_value = first_value(data, "traffic_limit_gb", "traffic_gb", "gb", "limit_gb")
+        if traffic_value != "":
+            try:
+                traffic_limit = parse_limit_bytes(traffic_value)
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
+            target["traffic_limit_bytes"] = traffic_limit
+            target["traffic_reset_pending"] = True
+            target.pop("quota_exceeded_at", None)
+            changed.append(f"traffic_limit_gb={gb_from_bytes(traffic_limit)}")
+
+        device_value = first_value(data, "device_limit", "devices", "device_count", "max_devices")
+        if device_value != "":
+            try:
+                device_limit = parse_device_limit_value(device_value)
+            except ValueError as exc:
+                self.send_json(400, {"ok": False, "error": str(exc)})
+                return
+            target["device_limit"] = device_limit
+            changed.append(f"device_limit={device_limit}")
 
         if not changed:
             self.send_json(400, {"ok": False, "error": "nothing_to_edit"})
@@ -4189,7 +4697,16 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(404, {"ok": False, "error": "user_not_found"})
             return
 
+        removed_ids = [str(user.get("uuid", "")) for user in users if user.get("name") == name]
         save_users(new_users)
+        if removed_ids:
+            devices = load_devices()
+            traffic = load_traffic()
+            for client_id in removed_ids:
+                devices.pop(client_id, None)
+                traffic.pop(client_id, None)
+            save_devices(devices)
+            save_traffic(traffic)
         log_action("api_client_delete", name)
         self.send_json(200, {"ok": True, "deleted": name})
 
@@ -4410,12 +4927,14 @@ start_sub_process() {
     fi
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
-    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$DEVICES_FILE" <<'PY' &
 import base64
 import datetime
+import hashlib
 import html
 import json
 import binascii
+import os
 import sys
 import time
 import urllib.parse
@@ -4443,6 +4962,7 @@ CDN_WS_HOST = sys.argv[18]
 CDN_WS_SNI = sys.argv[19] or CDN_WS_HOST
 CDN_WS_PORT = sys.argv[20] or "443"
 CDN_WS_TAG = sys.argv[21] or "CDN"
+DEVICES_FILE = sys.argv[22]
 LAST_ON_DEMAND_SYNC = 0
 
 
@@ -4482,12 +5002,23 @@ def load_users():
 
 
 def atomic_json(path, data):
-    import os
-
     tmp = f"{path}.tmp.{os.getpid()}"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def load_devices():
+    try:
+        with open(DEVICES_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def save_devices(devices):
+    atomic_json(DEVICES_FILE, devices)
 
 
 def upstream_config():
@@ -4535,7 +5066,7 @@ def sync_upstream_now(force=False):
             continue
         if not name or not client_id or expires_at <= 0:
             continue
-        users.append({
+        row = {
             "name": name,
             "uuid": client_id,
             "created_at": created_at,
@@ -4543,7 +5074,12 @@ def sync_upstream_now(force=False):
             "banned": bool(item.get("banned") or item.get("disabled")),
             "banned_at": int(item.get("banned_at", 0) or 0),
             "ban_reason": str(item.get("ban_reason", "") or ""),
-        })
+        }
+        row["traffic_limit_bytes"] = int(item.get("traffic_limit_bytes", 0) or 0)
+        row["device_limit"] = int(item.get("device_limit", 0) or 0)
+        if item.get("traffic_reset_pending"):
+            row["traffic_reset_pending"] = True
+        users.append(row)
 
     before = json.dumps(load_users(), ensure_ascii=False, sort_keys=True)
     after = json.dumps(users, ensure_ascii=False, sort_keys=True)
@@ -4567,6 +5103,96 @@ def find_user(identifier):
         except Exception:
             pass
     return None
+
+
+def first_param(params, *names):
+    for name in names:
+        values = params.get(name)
+        if values:
+            value = str(values[0]).strip()
+            if value:
+                return value
+    return ""
+
+
+def first_header(headers, *names):
+    lower = {str(key).lower(): str(value).strip() for key, value in headers.items()}
+    for name in names:
+        value = lower.get(name.lower(), "")
+        if value:
+            return value
+    return ""
+
+
+def request_device_id(headers, params, client_ip):
+    explicit = first_param(
+        params,
+        "hwid", "happ_hwid", "device_id", "device", "deviceId", "client_id", "clientId", "sid",
+    )
+    source = "query"
+    if not explicit:
+        explicit = first_header(
+            headers,
+            "X-HWID", "HWID", "X-Happ-HWID", "X-Device-ID", "Device-ID",
+            "X-Device-Id", "X-Client-Device-ID", "X-Client-ID", "Client-ID",
+            "X-Client-Identifier", "X-Sub-ID",
+        )
+        source = "header"
+    if explicit:
+        return "hwid:" + hashlib.sha256(explicit.encode("utf-8", "ignore")).hexdigest(), source, explicit[:80]
+
+    user_agent = first_header(headers, "User-Agent")
+    fallback = f"{client_ip}|{user_agent or 'unknown'}"
+    return "fallback:" + hashlib.sha256(fallback.encode("utf-8", "ignore")).hexdigest(), "fallback", (user_agent or client_ip)[:80]
+
+
+def register_device(user, headers, params, client_ip):
+    try:
+        limit = int(user.get("device_limit", 0) or 0)
+    except Exception:
+        limit = 0
+    if limit <= 0:
+        return True, None
+
+    client_id = str(user.get("uuid", ""))
+    if not client_id:
+        return True, None
+
+    device_id, source, label = request_device_id(headers, params, client_ip)
+    now = int(time.time())
+    devices = load_devices()
+    rows = devices.get(client_id, [])
+    if not isinstance(rows, list):
+        rows = []
+
+    for row in rows:
+        if isinstance(row, dict) and row.get("id") == device_id:
+            row["last_seen"] = now
+            row["ip"] = client_ip
+            row["user_agent"] = first_header(headers, "User-Agent")
+            save_devices(devices)
+            return True, None
+
+    if len(rows) >= limit:
+        return False, {
+            "ok": False,
+            "error": "device_limit_exceeded",
+            "limit": limit,
+            "used": len(rows),
+        }
+
+    rows.append({
+        "id": device_id,
+        "source": source,
+        "label": label,
+        "first_seen": now,
+        "last_seen": now,
+        "ip": client_ip,
+        "user_agent": first_header(headers, "User-Agent"),
+    })
+    devices[client_id] = rows
+    save_devices(devices)
+    return True, None
 
 
 def node_name():
@@ -4960,6 +5586,11 @@ class Handler(BaseHTTPRequestHandler):
         legacy_token = read_token()
         if not matched_uuid and (not legacy_token or token != legacy_token):
             self.send_json(401, {"ok": False, "error": "unauthorized"})
+            return
+
+        ok_device, device_error = register_device(user, self.headers, params, self.client_address[0])
+        if not ok_device:
+            self.send_json(403, device_error)
             return
 
         scope = params.get("scope", ["all"])[0]
@@ -5366,6 +5997,10 @@ if action == "create":
     payload = {"name": args[0], "days": int(args[1])}
     if len(args) > 2 and args[2]:
         payload["uuid"] = args[2]
+    if len(args) > 3 and args[3]:
+        payload["traffic_limit_gb"] = args[3]
+    if len(args) > 4 and args[4]:
+        payload["device_limit"] = args[4]
 elif action == "renew":
     if len(args) < 2:
         raise SystemExit("renew requires NAME DAYS")
@@ -5389,6 +6024,25 @@ elif action == "unban":
     method = "PATCH"
     path = "/clients/" + urllib.parse.quote(args[0], safe="") + "/unban"
     payload = {}
+elif action == "limit":
+    if len(args) < 2:
+        raise SystemExit("limit requires NAME ACTION")
+    method = "PATCH"
+    path = "/clients/" + urllib.parse.quote(args[0], safe="")
+    subaction = (args[1] or "status").lower()
+    payload = {}
+    if subaction in ("traffic", "gb", "quota"):
+        payload["traffic_limit_gb"] = args[2] if len(args) > 2 else "0"
+    elif subaction in ("devices", "device", "hwid"):
+        payload["device_limit"] = args[2] if len(args) > 2 else "0"
+    elif subaction in ("off", "disable", "clear", "none"):
+        payload["traffic_limit_gb"] = "0"
+        payload["device_limit"] = "0"
+    elif subaction not in ("status", "show", ""):
+        payload["traffic_limit_gb"] = args[1]
+        payload["device_limit"] = args[2] if len(args) > 2 else "0"
+    if not payload:
+        raise SystemExit("nothing_to_edit")
 else:
     raise SystemExit(f"unknown upstream action: {action}")
 
@@ -5522,6 +6176,10 @@ for user in load_local_users():
         continue
     days = max(1, int(math.ceil((expires_at - now) / 86400)))
     body = {"name": name, "days": days, "uuid": client_id}
+    if int(user.get("traffic_limit_bytes", 0) or 0):
+        body["traffic_limit_gb"] = round(int(user.get("traffic_limit_bytes", 0) or 0) / 1073741824, 3)
+    if int(user.get("device_limit", 0) or 0):
+        body["device_limit"] = int(user.get("device_limit", 0) or 0)
     try:
         request("POST", "/clients", body)
         pushed.append(name)
@@ -5581,7 +6239,7 @@ for item in clients:
         continue
     if not name or not client_id or expires_at <= 0:
         continue
-    users.append({
+    row = {
         "name": name,
         "uuid": client_id,
         "created_at": created_at,
@@ -5589,7 +6247,12 @@ for item in clients:
         "banned": bool(item.get("banned") or item.get("disabled")),
         "banned_at": int(item.get("banned_at", 0) or 0),
         "ban_reason": str(item.get("ban_reason", "") or ""),
-    })
+    }
+    row["traffic_limit_bytes"] = int(item.get("traffic_limit_bytes", 0) or 0)
+    row["device_limit"] = int(item.get("device_limit", 0) or 0)
+    if item.get("traffic_reset_pending"):
+        row["traffic_reset_pending"] = True
+    users.append(row)
 
 tmp = f"{users_file}.tmp.{os.getpid()}"
 with open(tmp, "w", encoding="utf-8") as f:
@@ -5813,7 +6476,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -5856,7 +6519,7 @@ import zipfile
 
 backup, data_dir = sys.argv[1], sys.argv[2]
 allowed = {
-    "users.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
+    "users.json", "devices.json", "traffic.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
     "api_token.txt", "sub_token.txt", "sub_name.txt", "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt",
@@ -5899,6 +6562,154 @@ cmd_stats() {
         echo "stats unavailable"
         echo "xray stats api may still be starting or unsupported by this xray build"
     }
+}
+
+enforce_traffic_limits() {
+    local OUT RC
+
+    if [ ! -x "$XRAY_BIN" ]; then
+        return 0
+    fi
+
+    OUT="$(python3 - "$USERS_FILE" "$TRAFFIC_FILE" "$XRAY_BIN" "$XRAY_STATS_PORT" <<'PY'
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+
+users_file, traffic_file, xray_bin, stats_port = sys.argv[1:5]
+
+def load_json(path, default):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, type(default)) else default
+    except Exception:
+        return default
+
+def save_json(path, data):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+try:
+    proc = subprocess.run(
+        [xray_bin, "api", "statsquery", f"--server=127.0.0.1:{stats_port}"],
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=6,
+        check=False,
+    )
+except Exception:
+    raise SystemExit(0)
+
+raw = proc.stdout or ""
+if not raw.strip():
+    raise SystemExit(0)
+
+stats = {}
+for name, value in re.findall(r'name:\s*"([^"]+)"[\s\S]*?value:\s*([0-9]+)', raw):
+    if not name.startswith("user>>>") or ">>>traffic>>>" not in name:
+        continue
+    parts = name.split(">>>")
+    if len(parts) < 5:
+        continue
+    email = parts[1]
+    direction = parts[-1]
+    try:
+        stats[(email, direction)] = stats.get((email, direction), 0) + int(value)
+    except Exception:
+        pass
+
+if not stats:
+    raise SystemExit(0)
+
+users = load_json(users_file, [])
+traffic = load_json(traffic_file, {})
+if not isinstance(users, list):
+    raise SystemExit(0)
+
+now = int(time.time())
+changed_traffic = False
+changed_users = False
+limited = []
+
+for user in users:
+    if not isinstance(user, dict):
+        continue
+    name = str(user.get("name", ""))
+    client_id = str(user.get("uuid", ""))
+    if not name or not client_id:
+        continue
+
+    counter = 0
+    for email in (name, name + "-reality"):
+        counter += int(stats.get((email, "uplink"), 0) or 0)
+        counter += int(stats.get((email, "downlink"), 0) or 0)
+
+    row = traffic.get(client_id, {})
+    if not isinstance(row, dict):
+        row = {}
+    used = int(row.get("used_bytes", 0) or 0)
+    last_counter = int(row.get("last_counter_bytes", 0) or 0)
+
+    if user.pop("traffic_reset_pending", False) or row.pop("reset_pending", False):
+        used = 0
+        last_counter = counter
+        changed_users = True
+    else:
+        delta = counter - last_counter if counter >= last_counter else counter
+        if delta > 0:
+            used += delta
+            last_counter = counter
+
+    new_row = {
+        "used_bytes": used,
+        "last_counter_bytes": last_counter,
+        "updated_at": now,
+    }
+    if traffic.get(client_id) != new_row:
+        traffic[client_id] = new_row
+        changed_traffic = True
+
+    limit_bytes = int(user.get("traffic_limit_bytes", 0) or 0)
+    if limit_bytes > 0 and used >= limit_bytes and not (user.get("banned") or user.get("disabled")):
+        user["banned"] = True
+        user["banned_at"] = now
+        user["ban_reason"] = f"traffic_quota_exceeded {used / 1073741824:.2f}/{limit_bytes / 1073741824:.2f}GB"
+        user["quota_exceeded_at"] = now
+        changed_users = True
+        limited.append(name)
+
+if changed_traffic:
+    save_json(traffic_file, traffic)
+if changed_users:
+    save_json(users_file, users)
+if limited:
+    print("quota_exceeded:" + ",".join(limited))
+PY
+)"
+    RC="$?"
+
+    if [ "$RC" -ne 0 ]; then
+        return 0
+    fi
+
+    if echo "$OUT" | grep -q '^quota_exceeded:'; then
+        echo "$OUT"
+        restart_xray >/dev/null 2>&1
+        sync_keys_file >/dev/null 2>&1
+        remember_users_state
+        restart_api_if_running
+        restart_sub_if_running
+        log_action "traffic_quota_exceeded" "$OUT"
+    fi
+
+    return 0
 }
 
 script_path() {
@@ -6417,7 +7228,7 @@ handle_cmd() {
             cmd_help
             ;;
         add)
-            cmd_add "${2:-}" "${3:-}"
+            cmd_add "${2:-}" "${3:-}" "${4:-}" "${5:-}"
             ;;
         del|delete|remove)
             cmd_del "${2:-}"
@@ -6437,6 +7248,9 @@ handle_cmd() {
             ;;
         link)
             make_link "${2:-}" || true
+            ;;
+        limit|limits|quota)
+            cmd_limit "${2:-}" "${3:-}" "${4:-}" "${5:-}"
             ;;
         keys)
             cmd_keys
@@ -6632,6 +7446,7 @@ start_server() {
 
     LAST_CHECK=0
     LAST_FEDERATION_SYNC=0
+    LAST_LIMIT_CHECK=0
 
     while true; do
         sync_external_user_changes
@@ -6651,6 +7466,11 @@ start_server() {
         if [ $((NOW - LAST_FEDERATION_SYNC)) -ge "$FEDERATION_SYNC_INTERVAL" ]; then
             sync_upstream_tick
             LAST_FEDERATION_SYNC="$NOW"
+        fi
+
+        if [ $((NOW - LAST_LIMIT_CHECK)) -ge "$LIMIT_CHECK_INTERVAL" ]; then
+            enforce_traffic_limits
+            LAST_LIMIT_CHECK="$NOW"
         fi
 
         auto_update_tick
