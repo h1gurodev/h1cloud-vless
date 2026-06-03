@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.01-limits"
+SCRIPT_VERSION="2026.06.04-cdn-path"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -42,6 +42,7 @@ CDN_WS_HOST_FILE="$DATA_DIR/cdn_ws_host.txt"
 CDN_WS_SNI_FILE="$DATA_DIR/cdn_ws_sni.txt"
 CDN_WS_PORT_FILE="$DATA_DIR/cdn_ws_port.txt"
 CDN_WS_TAG_FILE="$DATA_DIR/cdn_ws_tag.txt"
+CDN_WS_PATH_FILE="$DATA_DIR/cdn_ws_path.txt"
 PEERS_FILE="$DATA_DIR/peers.txt"
 NODES_FILE="$DATA_DIR/nodes.json"
 JOIN_TOKEN_FILE="$DATA_DIR/join_token.txt"
@@ -569,6 +570,28 @@ get_cdn_ws_tag_suffix() {
     fi
 
     echo "CDN"
+    return 0
+}
+
+get_cdn_ws_path() {
+    local PATH_VALUE
+
+    PATH_VALUE="${CDN_WS_PATH:-${VPN_CDN_WS_PATH:-}}"
+    if [ -z "$PATH_VALUE" ] && [ -f "$CDN_WS_PATH_FILE" ] && [ -s "$CDN_WS_PATH_FILE" ]; then
+        PATH_VALUE="$(head -n 1 "$CDN_WS_PATH_FILE" 2>/dev/null)"
+    fi
+
+    PATH_VALUE="$(strip_outer_quotes "$PATH_VALUE")"
+    if [ -z "$PATH_VALUE" ]; then
+        PATH_VALUE="/xray"
+    fi
+
+    case "$PATH_VALUE" in
+        /*) ;;
+        *) PATH_VALUE="/$PATH_VALUE" ;;
+    esac
+
+    printf '%s\n' "$PATH_VALUE"
     return 0
 }
 
@@ -1103,6 +1126,7 @@ sync_keys_file() {
     CDN_WS_SNI_VALUE=""
     CDN_WS_PORT_VALUE=""
     CDN_WS_TAG_VALUE=""
+    CDN_WS_PATH_VALUE=""
 
     if is_reality_enabled && ensure_reality_files >/dev/null 2>&1; then
         REALITY_ENABLED_VALUE="1"
@@ -1123,9 +1147,10 @@ sync_keys_file() {
         CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
         CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+        CDN_WS_PATH_VALUE="$(get_cdn_ws_path)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$TRAFFIC_FILE" <<'PY'
+    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" <<'PY'
 import datetime
 import json
 import sys
@@ -1152,7 +1177,8 @@ cdn_ws_host = sys.argv[17]
 cdn_ws_sni = sys.argv[18] or cdn_ws_host
 cdn_ws_port = sys.argv[19] or "443"
 cdn_ws_tag_suffix = sys.argv[20] or "CDN"
-traffic_file = sys.argv[21]
+cdn_ws_path = sys.argv[21] or "/xray"
+traffic_file = sys.argv[22]
 now = int(time.time())
 
 try:
@@ -1189,7 +1215,7 @@ if sub_port:
 if sub_name:
     lines.append(f"sub_name: {sub_name}")
 if cdn_ws_enabled:
-    lines.append(f"cdn_ws: {cdn_ws_host}:{cdn_ws_port} sni={cdn_ws_sni}")
+    lines.append(f"cdn_ws: {cdn_ws_host}:{cdn_ws_port} sni={cdn_ws_sni} path={cdn_ws_path}")
 lines.append(" ")
 
 def ws_link(name, uuid):
@@ -1204,7 +1230,7 @@ def cdn_ws_link(name, uuid):
     tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
     return (
         f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
-        f"?security=tls&sni={cdn_ws_sni}&type=ws&path=/xray"
+        f"?security=tls&sni={cdn_ws_sni}&type=ws&path={urllib.parse.quote(cdn_ws_path, safe='')}"
         f"&host={cdn_ws_sni}&encryption=none#{tag}"
     )
 
@@ -1579,9 +1605,10 @@ make_link() {
         CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
         CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+        CDN_WS_PATH_VALUE="$(get_cdn_ws_path)"
     fi
 
-    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" <<'PY'
+    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" <<'PY'
 import json, sys
 import urllib.parse
 
@@ -1602,6 +1629,7 @@ cdn_ws_host = sys.argv[14]
 cdn_ws_sni = sys.argv[15] or cdn_ws_host
 cdn_ws_port = sys.argv[16] or "443"
 cdn_ws_tag_suffix = sys.argv[17] or "CDN"
+cdn_ws_path = sys.argv[18] or "/xray"
 
 try:
     with open(users_file, "r", encoding="utf-8") as f:
@@ -1626,7 +1654,7 @@ for u in users:
             cdn_tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
             cdn_link = (
                 f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
-                f"?security=tls&sni={cdn_ws_sni}&type=ws&path=/xray"
+                f"?security=tls&sni={cdn_ws_sni}&type=ws&path={urllib.parse.quote(cdn_ws_path, safe='')}"
                 f"&host={cdn_ws_sni}&encryption=none#{cdn_tag}"
             )
             print("ws-cdn:")
@@ -1720,6 +1748,7 @@ cmd_help() {
     echo "vpn logs [COUNT]           show action logs"
     echo "vpn node NAME              set node/location name for link tags"
     echo "vpn cdn HOST SNI [PORT]    add WS-CDN links for all clients"
+    echo "vpn cdn HOST SNI PORT TAG PATH"
     echo "vpn cdn off/status         manage generated WS-CDN links"
     echo "vpn join-token             show token for node auto-registration"
     echo "vpn join MASTER TOKEN NAME auto-register this node on master"
@@ -1756,7 +1785,7 @@ cmd_help() {
     echo "vpn ban test abuse"
     echo "vpn unban test"
     echo "vpn node Germany"
-    echo "vpn cdn cdn.de.h1cloud.su top2355543541.mwscdn.ru 443 CDN"
+    echo "vpn cdn cdn.gateway.h1cloud.su top2355543541.mwscdn.ru 443 CDN /h1cdn/nl1/xray"
     echo "vpn sub name Germany-VPN"
     echo "vpn join-token"
     echo "vpn join http://MASTER:PORT/api JOIN_TOKEN Germany"
@@ -2677,7 +2706,7 @@ cmd_reality() {
 
 cmd_cdn() {
     local ACTION="${1:-status}"
-    local CDN_HOST_VALUE SNI_HOST_VALUE PORT_VALUE TAG_VALUE
+    local CDN_HOST_VALUE SNI_HOST_VALUE PORT_VALUE TAG_VALUE PATH_VALUE
 
     case "$ACTION" in
         status|"")
@@ -2690,10 +2719,11 @@ cmd_cdn() {
                 echo "sni/host: $(get_cdn_ws_sni)"
                 echo "port: $(get_cdn_ws_port)"
                 echo "tag suffix: $(get_cdn_ws_tag_suffix)"
+                echo "path: $(get_cdn_ws_path)"
                 echo "origin remains: $(read_domain):$(get_public_port) /xray"
             else
                 echo "status: disabled"
-                echo "enable: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                echo "enable: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PATH]"
             fi
             print_line
             ;;
@@ -2710,20 +2740,37 @@ cmd_cdn() {
             SNI_HOST_VALUE="$(normalize_domain "${3:-}")"
             PORT_VALUE="${4:-443}"
             TAG_VALUE="$(strip_outer_quotes "${5:-CDN}")"
+            PATH_VALUE="$(strip_outer_quotes "${6:-}")"
+            if [ -z "$PATH_VALUE" ]; then
+                case "$TAG_VALUE" in
+                    /*)
+                        PATH_VALUE="$TAG_VALUE"
+                        TAG_VALUE="CDN"
+                        ;;
+                esac
+            fi
+            if [ -z "$PATH_VALUE" ]; then
+                PATH_VALUE="/xray"
+            fi
+            case "$PATH_VALUE" in
+                /*) ;;
+                *) PATH_VALUE="/$PATH_VALUE" ;;
+            esac
             if [ -z "$CDN_HOST_VALUE" ] || [ -z "$SNI_HOST_VALUE" ] || ! validate_port "$PORT_VALUE"; then
-                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
-                echo "or:    vpn cdn ws CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PATH]"
+                echo "or:    vpn cdn ws CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PATH]"
                 return 0
             fi
             echo "$CDN_HOST_VALUE" > "$CDN_WS_HOST_FILE"
             echo "$SNI_HOST_VALUE" > "$CDN_WS_SNI_FILE"
             echo "$PORT_VALUE" > "$CDN_WS_PORT_FILE"
             echo "${TAG_VALUE:-CDN}" > "$CDN_WS_TAG_FILE"
+            echo "$PATH_VALUE" > "$CDN_WS_PATH_FILE"
             set_cdn_ws_enabled 1
             sync_keys_file >/dev/null 2>&1
             restart_api_if_running
             restart_sub_if_running
-            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN}"
+            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN} path=$PATH_VALUE"
             echo "ws-cdn saved"
             echo "current and future clients will include ws-cdn links"
             ;;
@@ -2732,19 +2779,36 @@ cmd_cdn() {
             SNI_HOST_VALUE="$(normalize_domain "${2:-}")"
             PORT_VALUE="${3:-443}"
             TAG_VALUE="$(strip_outer_quotes "${4:-CDN}")"
+            PATH_VALUE="$(strip_outer_quotes "${5:-}")"
+            if [ -z "$PATH_VALUE" ]; then
+                case "$TAG_VALUE" in
+                    /*)
+                        PATH_VALUE="$TAG_VALUE"
+                        TAG_VALUE="CDN"
+                        ;;
+                esac
+            fi
+            if [ -z "$PATH_VALUE" ]; then
+                PATH_VALUE="/xray"
+            fi
+            case "$PATH_VALUE" in
+                /*) ;;
+                *) PATH_VALUE="/$PATH_VALUE" ;;
+            esac
             if [ -z "$CDN_HOST_VALUE" ] || [ -z "$SNI_HOST_VALUE" ] || ! validate_port "$PORT_VALUE"; then
-                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX]"
+                echo "usage: vpn cdn CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PATH]"
                 return 0
             fi
             echo "$CDN_HOST_VALUE" > "$CDN_WS_HOST_FILE"
             echo "$SNI_HOST_VALUE" > "$CDN_WS_SNI_FILE"
             echo "$PORT_VALUE" > "$CDN_WS_PORT_FILE"
             echo "${TAG_VALUE:-CDN}" > "$CDN_WS_TAG_FILE"
+            echo "$PATH_VALUE" > "$CDN_WS_PATH_FILE"
             set_cdn_ws_enabled 1
             sync_keys_file >/dev/null 2>&1
             restart_api_if_running
             restart_sub_if_running
-            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN}"
+            log_action "cdn_ws_set" "cdn=$CDN_HOST_VALUE sni=$SNI_HOST_VALUE port=$PORT_VALUE tag=${TAG_VALUE:-CDN} path=$PATH_VALUE"
             echo "ws-cdn saved"
             echo "current and future clients will include ws-cdn links"
             ;;
@@ -2801,7 +2865,7 @@ start_api_process() {
     local REALITY_PRIVATE_KEY_VALUE REALITY_PUBLIC_KEY_VALUE REALITY_SHORT_ID_VALUE
     local SUB_PORT_VALUE SUB_TOKEN_VALUE SUB_PUBLIC_HOST_VALUE RUNNING_PORT
     local API_PUBLIC_HOST_VALUE JOIN_TOKEN_VALUE
-    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE
+    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE CDN_WS_PATH_VALUE
 
     if ! validate_port "$API_BIND_PORT"; then
         echo "usage: vpn api PORT"
@@ -2855,6 +2919,7 @@ start_api_process() {
     CDN_WS_SNI_VALUE=""
     CDN_WS_PORT_VALUE=""
     CDN_WS_TAG_VALUE=""
+    CDN_WS_PATH_VALUE=""
 
     if [ -n "$SUB_PORT_VALUE" ] && validate_port "$SUB_PORT_VALUE"; then
         SUB_TOKEN_VALUE="$(get_sub_token)"
@@ -2867,9 +2932,10 @@ start_api_process() {
         CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
         CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+        CDN_WS_PATH_VALUE="$(get_cdn_ws_path)"
     fi
 
-    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" <<'PY' &
 import datetime
 import hashlib
 import json
@@ -2929,25 +2995,27 @@ CDN_WS_HOST = sys.argv[37]
 CDN_WS_SNI = sys.argv[38] or CDN_WS_HOST
 CDN_WS_PORT = sys.argv[39] or "443"
 CDN_WS_TAG = sys.argv[40] or "CDN"
+CDN_WS_PATH = sys.argv[41] or "/xray"
 API_TOKEN_FILE = TOKEN_FILE
-SUB_TOKEN_FILE = sys.argv[41]
-REALITY_ENABLED_FILE = sys.argv[42]
-REALITY_PRIVATE_KEY_FILE = sys.argv[43]
-REALITY_PUBLIC_KEY_FILE = sys.argv[44]
-REALITY_SHORT_ID_FILE = sys.argv[45]
-REALITY_SNI_FILE = sys.argv[46]
-REALITY_DEST_FILE = sys.argv[47]
-REALITY_PORT_FILE = sys.argv[48]
-REALITY_PUBLIC_PORT_FILE = sys.argv[49]
-PUBLIC_IP_FILE = sys.argv[50]
-SUB_NAME_FILE = sys.argv[51]
-CDN_WS_ENABLED_FILE = sys.argv[52]
-CDN_WS_HOST_FILE = sys.argv[53]
-CDN_WS_SNI_FILE = sys.argv[54]
-CDN_WS_PORT_FILE = sys.argv[55]
-CDN_WS_TAG_FILE = sys.argv[56]
-DEVICES_FILE = sys.argv[57]
-TRAFFIC_FILE = sys.argv[58]
+SUB_TOKEN_FILE = sys.argv[42]
+REALITY_ENABLED_FILE = sys.argv[43]
+REALITY_PRIVATE_KEY_FILE = sys.argv[44]
+REALITY_PUBLIC_KEY_FILE = sys.argv[45]
+REALITY_SHORT_ID_FILE = sys.argv[46]
+REALITY_SNI_FILE = sys.argv[47]
+REALITY_DEST_FILE = sys.argv[48]
+REALITY_PORT_FILE = sys.argv[49]
+REALITY_PUBLIC_PORT_FILE = sys.argv[50]
+PUBLIC_IP_FILE = sys.argv[51]
+SUB_NAME_FILE = sys.argv[52]
+CDN_WS_ENABLED_FILE = sys.argv[53]
+CDN_WS_HOST_FILE = sys.argv[54]
+CDN_WS_SNI_FILE = sys.argv[55]
+CDN_WS_PORT_FILE = sys.argv[56]
+CDN_WS_TAG_FILE = sys.argv[57]
+CDN_WS_PATH_FILE = sys.argv[58]
+DEVICES_FILE = sys.argv[59]
+TRAFFIC_FILE = sys.argv[60]
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -3182,7 +3250,7 @@ def backup_targets():
         API_TOKEN_FILE, SUB_TOKEN_FILE, PEERS_FILE, NODES_FILE, JOIN_TOKEN_FILE,
         UPSTREAM_API_URL_FILE, UPSTREAM_API_TOKEN_FILE, UPDATE_URL_FILE, AUTO_UPDATE_FILE,
         SUB_NAME_FILE, CDN_WS_ENABLED_FILE, CDN_WS_HOST_FILE, CDN_WS_SNI_FILE,
-        CDN_WS_PORT_FILE, CDN_WS_TAG_FILE,
+        CDN_WS_PORT_FILE, CDN_WS_TAG_FILE, CDN_WS_PATH_FILE,
         REALITY_ENABLED_FILE, REALITY_PRIVATE_KEY_FILE, REALITY_PUBLIC_KEY_FILE,
         REALITY_SHORT_ID_FILE, REALITY_SNI_FILE, REALITY_DEST_FILE,
         REALITY_PORT_FILE, REALITY_PUBLIC_PORT_FILE, PUBLIC_IP_FILE,
@@ -3413,7 +3481,7 @@ def make_cdn_ws_link(user):
     tag = urllib.parse.quote(f"{read_node_name() or read_domain()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
     return (
         f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
-        f"?security=tls&sni={CDN_WS_SNI}&type=ws&path=/xray"
+        f"?security=tls&sni={CDN_WS_SNI}&type=ws&path={urllib.parse.quote(CDN_WS_PATH, safe='')}"
         f"&host={CDN_WS_SNI}&encryption=none#{tag}"
     )
 
@@ -3533,6 +3601,7 @@ def status_payload(users):
             "sni": CDN_WS_SNI,
             "port": CDN_WS_PORT,
             "tag_suffix": CDN_WS_TAG,
+            "path": CDN_WS_PATH,
         },
         "reality": {
             "enabled": REALITY_ENABLED,
@@ -3668,7 +3737,7 @@ def write_keys(users):
     if SUB_NAME:
         lines.append(f"sub_name: {SUB_NAME}")
     if CDN_WS_ENABLED and CDN_WS_HOST:
-        lines.append(f"cdn_ws: {CDN_WS_HOST}:{CDN_WS_PORT} sni={CDN_WS_SNI}")
+        lines.append(f"cdn_ws: {CDN_WS_HOST}:{CDN_WS_PORT} sni={CDN_WS_SNI} path={CDN_WS_PATH}")
     lines.append(" ")
 
     active_count = 0
@@ -3880,7 +3949,7 @@ function renderStats(status) {
     ["Node", status.node_name || status.domain || "-"],
     ["Clients", `${status.clients?.active || 0} active / ${status.clients?.total || 0} total`],
     ["WS", `:${status.ws?.public_port || "-"}`],
-    ["WS-CDN", cdn.enabled ? `${cdn.host}:${cdn.port || 443}` : "off"],
+    ["WS-CDN", cdn.enabled ? `${cdn.host}:${cdn.port || 443} ${cdn.path || "/xray"}` : "off"],
     ["Reality", status.reality?.enabled ? `:${status.reality.public_port}` : "off"],
     ["Subscription", sub.enabled ? (sub.name || `:${sub.port}`) : "off"],
     ["Federation", status.federation?.enabled ? "on" : "off"],
@@ -4884,7 +4953,7 @@ stop_sub_process() {
 start_sub_process() {
     local SUB_BIND_PORT="$1"
     local TOKEN WS_PUBLIC_PORT_VALUE RUNNING_PORT REALITY_ENABLED_VALUE REALITY_PUBLIC_HOST_VALUE NODE_NAME_VALUE
-    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE
+    local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE CDN_WS_PATH_VALUE
 
     if ! validate_port "$SUB_BIND_PORT"; then
         echo "usage: vpn sub PORT"
@@ -4918,16 +4987,18 @@ start_sub_process() {
     CDN_WS_SNI_VALUE=""
     CDN_WS_PORT_VALUE=""
     CDN_WS_TAG_VALUE=""
+    CDN_WS_PATH_VALUE=""
     if is_cdn_ws_enabled; then
         CDN_WS_ENABLED_VALUE="1"
         CDN_WS_HOST_VALUE="$(get_cdn_ws_host)"
         CDN_WS_SNI_VALUE="$(get_cdn_ws_sni)"
         CDN_WS_PORT_VALUE="$(get_cdn_ws_port)"
         CDN_WS_TAG_VALUE="$(get_cdn_ws_tag_suffix)"
+        CDN_WS_PATH_VALUE="$(get_cdn_ws_path)"
     fi
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
-    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$DEVICES_FILE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$DEVICES_FILE" <<'PY' &
 import base64
 import datetime
 import hashlib
@@ -4962,7 +5033,8 @@ CDN_WS_HOST = sys.argv[18]
 CDN_WS_SNI = sys.argv[19] or CDN_WS_HOST
 CDN_WS_PORT = sys.argv[20] or "443"
 CDN_WS_TAG = sys.argv[21] or "CDN"
-DEVICES_FILE = sys.argv[22]
+CDN_WS_PATH = sys.argv[22] or "/xray"
+DEVICES_FILE = sys.argv[23]
 LAST_ON_DEMAND_SYNC = 0
 
 
@@ -5302,7 +5374,7 @@ def make_links(user):
         cdn_tag = urllib.parse.quote(f"{node_name()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
         links.append(
             f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
-            f"?security=tls&sni={CDN_WS_SNI}&type=ws&path=/xray"
+            f"?security=tls&sni={CDN_WS_SNI}&type=ws&path={urllib.parse.quote(CDN_WS_PATH, safe='')}"
             f"&host={CDN_WS_SNI}&encryption=none#{cdn_tag}"
         )
     if REALITY_ENABLED:
@@ -6476,7 +6548,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -6522,7 +6594,7 @@ allowed = {
     "users.json", "devices.json", "traffic.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
     "api_token.txt", "sub_token.txt", "sub_name.txt", "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
-    "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt",
+    "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
     "reality_enabled.txt", "reality_private_key.txt", "reality_public_key.txt",
     "reality_short_id.txt", "reality_sni.txt", "reality_dest.txt",
     "reality_port.txt", "reality_public_port.txt", "public_ip.txt",
