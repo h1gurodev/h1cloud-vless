@@ -1819,6 +1819,10 @@ main_inbound = {
     "settings": {
         "clients": clients,
         "decryption": "none"
+    },
+    "sniffing": {
+        "enabled": True,
+        "destOverride": ["http", "tls", "quic"]
     }
 }
 
@@ -4496,6 +4500,7 @@ def write_config(users):
         "listen": "0.0.0.0",
         "protocol": "vless",
         "settings": {"clients": clients, "decryption": "none"},
+        "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
     }
     if TRANSPORT == "xhttp":
         main_inbound["streamSettings"] = {
