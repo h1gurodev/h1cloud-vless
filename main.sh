@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.04-xhttp"
+SCRIPT_VERSION="2026.06.04-xhttp-extra"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -118,7 +118,7 @@ init_files() {
     fi
 
     if [ ! -f "$XHTTP_PATH_FILE" ]; then
-        echo "/api/v1/sync" > "$XHTTP_PATH_FILE"
+        echo "/api/v1/sync/" > "$XHTTP_PATH_FILE"
     fi
 
     if [ ! -f "$XHTTP_METHOD_FILE" ]; then
@@ -658,12 +658,16 @@ get_xhttp_path() {
 
     PATH_VALUE="$(strip_outer_quotes "$PATH_VALUE")"
     if [ -z "$PATH_VALUE" ]; then
-        PATH_VALUE="/api/v1/sync"
+        PATH_VALUE="/api/v1/sync/"
     fi
 
     case "$PATH_VALUE" in
         /*) ;;
         *) PATH_VALUE="/$PATH_VALUE" ;;
+    esac
+    case "$PATH_VALUE" in
+        */) ;;
+        *) PATH_VALUE="$PATH_VALUE/" ;;
     esac
 
     printf '%s\n' "$PATH_VALUE"
@@ -809,11 +813,14 @@ get_cdn_xhttp_public_path() {
         /*) ;;
         *) PATH_VALUE="/$PATH_VALUE" ;;
     esac
+    case "$PATH_VALUE" in
+        */) ;;
+        *) PATH_VALUE="$PATH_VALUE/" ;;
+    esac
 
     printf '%s\n' "$PATH_VALUE"
     return 0
 }
-
 make_uuid() {
     if [ -f /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
@@ -1386,12 +1393,67 @@ sync_keys_file() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
+    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
 import datetime
 import json
 import sys
 import time
 import urllib.parse
+
+def xhttp_client_extra(method):
+    method = (method or "GET").upper()
+    if method not in ("GET", "POST", "PUT"):
+        method = "GET"
+    return {
+        "xmux": {
+            "cMaxReuseTimes": "48-96",
+            "maxConcurrency": "4-8",
+            "maxConnections": 0,
+            "hKeepAlivePeriod": 0,
+            "hMaxRequestTimes": "500-900",
+            "hMaxReusableSecs": "300-900",
+        },
+        "seqKey": "page",
+        "sessionKey": "X-Request-Id",
+        "xPaddingKey": "_dc",
+        "seqPlacement": "query",
+        "uplinkDataKey": "X-Payload",
+        "xPaddingBytes": "80-240",
+        "xPaddingMethod": "tokenish",
+        "uplinkChunkSize": "2048-3072",
+        "sessionPlacement": "header",
+        "uplinkHTTPMethod": method,
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "query",
+        "scMaxEachPostBytes": "4096-8192",
+        "uplinkDataPlacement": "header",
+    }
+
+
+def xhttp_extra_param(method):
+    extra = json.dumps(xhttp_client_extra(method), ensure_ascii=False, separators=(",", ":"))
+    return urllib.parse.quote(extra, safe="")
+
+
+def normalize_xhttp_path_py(path):
+    path = str(path or "/api/v1/sync/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
+    path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
+    extra = xhttp_extra_param(method)
+    tag = urllib.parse.quote(tag, safe="")
+    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if security == "tls":
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+    else:
+        url += "&security=none"
+    return url + f"#{tag}"
 
 users_file = sys.argv[1]
 key_file = sys.argv[2]
@@ -1416,17 +1478,24 @@ cdn_ws_tag_suffix = sys.argv[20] or "CDN"
 cdn_ws_path = sys.argv[21] or "/xray"
 traffic_file = sys.argv[22]
 transport = sys.argv[23] if len(sys.argv) > 23 else "ws"
-xhttp_path = sys.argv[24] if len(sys.argv) > 24 and sys.argv[24] else "/api/v1/sync"
-cdn_xhttp_enabled = len(sys.argv) > 25 and sys.argv[25] == "1"
-cdn_xhttp_host = sys.argv[26] if len(sys.argv) > 26 else ""
-cdn_xhttp_sni = (sys.argv[27] if len(sys.argv) > 27 else "") or cdn_xhttp_host
-cdn_xhttp_port = (sys.argv[28] if len(sys.argv) > 28 else "") or "443"
-cdn_xhttp_tag_suffix = (sys.argv[29] if len(sys.argv) > 29 else "") or "CDN"
-cdn_xhttp_public_path = (sys.argv[30] if len(sys.argv) > 30 else "") or xhttp_path
+xhttp_path = sys.argv[24] if len(sys.argv) > 24 and sys.argv[24] else "/api/v1/sync/"
+xhttp_method = (sys.argv[25] if len(sys.argv) > 25 and sys.argv[25] else "GET").upper()
+cdn_xhttp_enabled = len(sys.argv) > 26 and sys.argv[26] == "1"
+cdn_xhttp_host = sys.argv[27] if len(sys.argv) > 27 else ""
+cdn_xhttp_sni = (sys.argv[28] if len(sys.argv) > 28 else "") or cdn_xhttp_host
+cdn_xhttp_port = (sys.argv[29] if len(sys.argv) > 29 else "") or "443"
+cdn_xhttp_tag_suffix = (sys.argv[30] if len(sys.argv) > 30 else "") or "CDN"
+cdn_xhttp_public_path = (sys.argv[31] if len(sys.argv) > 31 else "") or xhttp_path
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
+if not xhttp_path.endswith("/"):
+    xhttp_path += "/"
+if xhttp_method not in ("GET", "POST", "PUT"):
+    xhttp_method = "GET"
 if not cdn_xhttp_public_path.startswith("/"):
     cdn_xhttp_public_path = "/" + cdn_xhttp_public_path
+if not cdn_xhttp_public_path.endswith("/"):
+    cdn_xhttp_public_path += "/"
 now = int(time.time())
 
 try:
@@ -1478,11 +1547,9 @@ def ws_link(name, uuid):
     return f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{tag}"
 
 def xhttp_link(name, uuid):
-    tag = urllib.parse.quote(f"{node_name} XHTTP", safe="")
-    path = urllib.parse.quote(xhttp_path, safe="")
-    if str(ws_port) == "443":
-        return f"vless://{uuid}@{domain}:{ws_port}?type=xhttp&security=tls&sni={domain}&host={domain}&path={path}&mode=packet-up&encryption=none#{tag}"
-    return f"vless://{uuid}@{domain}:{ws_port}?type=xhttp&security=none&host={domain}&path={path}&mode=packet-up&encryption=none#{tag}"
+    tag = f"{node_name} XHTTP"
+    security = "tls" if str(ws_port) == "443" else "none"
+    return build_xhttp_vless(uuid, domain, ws_port, xhttp_path, domain, tag, security=security, sni=domain, method=xhttp_method)
 
 def cdn_ws_link(name, uuid):
     if not cdn_ws_enabled or not cdn_ws_host:
@@ -1497,13 +1564,8 @@ def cdn_ws_link(name, uuid):
 def cdn_xhttp_link(name, uuid):
     if not cdn_xhttp_enabled or not cdn_xhttp_host:
         return ""
-    tag = urllib.parse.quote(f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-"), safe="")
-    return (
-        f"vless://{uuid}@{cdn_xhttp_host}:{cdn_xhttp_port}"
-        f"?type=xhttp&security=tls&sni={cdn_xhttp_sni}&host={cdn_xhttp_sni}"
-        f"&path={urllib.parse.quote(cdn_xhttp_public_path, safe='')}&mode=packet-up"
-        f"&encryption=none#{tag}"
-    )
+    tag = f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-")
+    return build_xhttp_vless(uuid, cdn_xhttp_host, cdn_xhttp_port, cdn_xhttp_public_path, cdn_xhttp_sni, tag, security="tls", sni=cdn_xhttp_sni, method=xhttp_method)
 
 def reality_link(name, uuid):
     tag = urllib.parse.quote(f"{node_name} Reality", safe="")
@@ -1708,10 +1770,12 @@ reality_private_key = sys.argv[8]
 reality_short_id = sys.argv[9]
 stats_port = int(sys.argv[10])
 transport = sys.argv[11] if len(sys.argv) > 11 else "ws"
-xhttp_path = sys.argv[12] if len(sys.argv) > 12 and sys.argv[12] else "/api/v1/sync"
+xhttp_path = sys.argv[12] if len(sys.argv) > 12 and sys.argv[12] else "/api/v1/sync/"
 xhttp_method = (sys.argv[13] if len(sys.argv) > 13 and sys.argv[13] else "GET").upper()
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
+if not xhttp_path.endswith("/"):
+    xhttp_path += "/"
 if xhttp_method not in ("GET", "POST", "PUT"):
     xhttp_method = "GET"
 
@@ -1765,15 +1829,25 @@ if transport == "xhttp":
         "xhttpSettings": {
             "mode": "packet-up",
             "path": xhttp_path,
-            "xPaddingKey": "_dc",
-            "xPaddingHeader": "X-Cache",
-            "xPaddingMethod": "tokenish",
-            "uplinkHTTPMethod": xhttp_method,
-            "xPaddingObfsMode": True,
-            "xPaddingPlacement": "queryInHeader",
-            "scMaxEachPostBytes": 524288,
-            "scMaxConcurrentPosts": 1,
-            "scMinPostsIntervalMs": 150
+            "extra": {
+                "seqKey": "page",
+                "sessionKey": "X-Request-Id",
+                "noSSEHeader": False,
+                "xPaddingKey": "_dc",
+                "seqPlacement": "query",
+                "uplinkDataKey": "X-Payload",
+                "xPaddingBytes": "80-240",
+                "xPaddingMethod": "tokenish",
+                "uplinkChunkSize": "2048-3072",
+                "sessionPlacement": "header",
+                "uplinkHTTPMethod": xhttp_method,
+                "xPaddingObfsMode": True,
+                "xPaddingPlacement": "query",
+                "scMaxBufferedPosts": 30,
+                "scMaxEachPostBytes": "4096-8192",
+                "uplinkDataPlacement": "header",
+                "serverMaxHeaderBytes": 32768
+            }
         }
     }
 else:
@@ -1938,9 +2012,64 @@ make_link() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
+    python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$(get_xhttp_method)" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
 import json, sys
 import urllib.parse
+
+def xhttp_client_extra(method):
+    method = (method or "GET").upper()
+    if method not in ("GET", "POST", "PUT"):
+        method = "GET"
+    return {
+        "xmux": {
+            "cMaxReuseTimes": "48-96",
+            "maxConcurrency": "4-8",
+            "maxConnections": 0,
+            "hKeepAlivePeriod": 0,
+            "hMaxRequestTimes": "500-900",
+            "hMaxReusableSecs": "300-900",
+        },
+        "seqKey": "page",
+        "sessionKey": "X-Request-Id",
+        "xPaddingKey": "_dc",
+        "seqPlacement": "query",
+        "uplinkDataKey": "X-Payload",
+        "xPaddingBytes": "80-240",
+        "xPaddingMethod": "tokenish",
+        "uplinkChunkSize": "2048-3072",
+        "sessionPlacement": "header",
+        "uplinkHTTPMethod": method,
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "query",
+        "scMaxEachPostBytes": "4096-8192",
+        "uplinkDataPlacement": "header",
+    }
+
+
+def xhttp_extra_param(method):
+    extra = json.dumps(xhttp_client_extra(method), ensure_ascii=False, separators=(",", ":"))
+    return urllib.parse.quote(extra, safe="")
+
+
+def normalize_xhttp_path_py(path):
+    path = str(path or "/api/v1/sync/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
+    path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
+    extra = xhttp_extra_param(method)
+    tag = urllib.parse.quote(tag, safe="")
+    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if security == "tls":
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+    else:
+        url += "&security=none"
+    return url + f"#{tag}"
 
 users_file = sys.argv[1]
 name = sys.argv[2]
@@ -1961,17 +2090,24 @@ cdn_ws_port = sys.argv[16] or "443"
 cdn_ws_tag_suffix = sys.argv[17] or "CDN"
 cdn_ws_path = sys.argv[18] or "/xray"
 transport = sys.argv[19] if len(sys.argv) > 19 else "ws"
-xhttp_path = sys.argv[20] if len(sys.argv) > 20 and sys.argv[20] else "/api/v1/sync"
-cdn_xhttp_enabled = len(sys.argv) > 21 and sys.argv[21] == "1"
-cdn_xhttp_host = sys.argv[22] if len(sys.argv) > 22 else ""
-cdn_xhttp_sni = (sys.argv[23] if len(sys.argv) > 23 else "") or cdn_xhttp_host
-cdn_xhttp_port = (sys.argv[24] if len(sys.argv) > 24 else "") or "443"
-cdn_xhttp_tag_suffix = (sys.argv[25] if len(sys.argv) > 25 else "") or "CDN"
-cdn_xhttp_public_path = (sys.argv[26] if len(sys.argv) > 26 else "") or xhttp_path
+xhttp_path = sys.argv[20] if len(sys.argv) > 20 and sys.argv[20] else "/api/v1/sync/"
+xhttp_method = (sys.argv[21] if len(sys.argv) > 21 and sys.argv[21] else "GET").upper()
+cdn_xhttp_enabled = len(sys.argv) > 22 and sys.argv[22] == "1"
+cdn_xhttp_host = sys.argv[23] if len(sys.argv) > 23 else ""
+cdn_xhttp_sni = (sys.argv[24] if len(sys.argv) > 24 else "") or cdn_xhttp_host
+cdn_xhttp_port = (sys.argv[25] if len(sys.argv) > 25 else "") or "443"
+cdn_xhttp_tag_suffix = (sys.argv[26] if len(sys.argv) > 26 else "") or "CDN"
+cdn_xhttp_public_path = (sys.argv[27] if len(sys.argv) > 27 else "") or xhttp_path
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
+if not xhttp_path.endswith("/"):
+    xhttp_path += "/"
+if xhttp_method not in ("GET", "POST", "PUT"):
+    xhttp_method = "GET"
 if not cdn_xhttp_public_path.startswith("/"):
     cdn_xhttp_public_path = "/" + cdn_xhttp_public_path
+if not cdn_xhttp_public_path.endswith("/"):
+    cdn_xhttp_public_path += "/"
 
 try:
     with open(users_file, "r", encoding="utf-8") as f:
@@ -1991,12 +2127,8 @@ for u in users:
         else:
             ws_link = f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         if transport == "xhttp":
-            xhttp_tag = urllib.parse.quote(f"{node_name} XHTTP", safe="")
-            xhttp_path_enc = urllib.parse.quote(xhttp_path, safe="")
-            if str(ws_port) == "443":
-                xhttp_link = f"vless://{uuid}@{domain}:{ws_port}?type=xhttp&security=tls&sni={domain}&host={domain}&path={xhttp_path_enc}&mode=packet-up&encryption=none#{xhttp_tag}"
-            else:
-                xhttp_link = f"vless://{uuid}@{domain}:{ws_port}?type=xhttp&security=none&host={domain}&path={xhttp_path_enc}&mode=packet-up&encryption=none#{xhttp_tag}"
+            security = "tls" if str(ws_port) == "443" else "none"
+            xhttp_link = build_xhttp_vless(uuid, domain, ws_port, xhttp_path, domain, f"{node_name} XHTTP", security=security, sni=domain, method=xhttp_method)
             print("xhttp:")
             print(xhttp_link)
         else:
@@ -2012,13 +2144,7 @@ for u in users:
             print("ws-cdn:")
             print(cdn_link)
         if cdn_xhttp_enabled and cdn_xhttp_host:
-            cdn_tag = urllib.parse.quote(f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-"), safe="")
-            cdn_link = (
-                f"vless://{uuid}@{cdn_xhttp_host}:{cdn_xhttp_port}"
-                f"?type=xhttp&security=tls&sni={cdn_xhttp_sni}&host={cdn_xhttp_sni}"
-                f"&path={urllib.parse.quote(cdn_xhttp_public_path, safe='')}&mode=packet-up"
-                f"&encryption=none#{cdn_tag}"
-            )
+            cdn_link = build_xhttp_vless(uuid, cdn_xhttp_host, cdn_xhttp_port, cdn_xhttp_public_path, cdn_xhttp_sni, f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-"), security="tls", sni=cdn_xhttp_sni, method=xhttp_method)
             print("xhttp-cdn:")
             print(cdn_link)
         if reality_enabled:
@@ -3094,6 +3220,10 @@ cmd_xhttp() {
                     /*) ;;
                     *) PATH_VALUE="/$PATH_VALUE" ;;
                 esac
+                case "$PATH_VALUE" in
+                    */) ;;
+                    *) PATH_VALUE="$PATH_VALUE/" ;;
+                esac
                 echo "$PATH_VALUE" > "$XHTTP_PATH_FILE"
             fi
             if [ -n "$METHOD_VALUE" ]; then
@@ -3131,12 +3261,16 @@ cmd_xhttp() {
         path)
             PATH_VALUE="$(strip_outer_quotes "${2:-}")"
             if [ -z "$PATH_VALUE" ]; then
-                echo "usage: vpn xhttp path /api/v1/sync"
+                echo "usage: vpn xhttp path /api/v1/sync/"
                 return 0
             fi
             case "$PATH_VALUE" in
                 /*) ;;
                 *) PATH_VALUE="/$PATH_VALUE" ;;
+            esac
+            case "$PATH_VALUE" in
+                */) ;;
+                *) PATH_VALUE="$PATH_VALUE/" ;;
             esac
             echo "$PATH_VALUE" > "$XHTTP_PATH_FILE"
             if [ "$(get_transport)" = "xhttp" ]; then
@@ -3166,7 +3300,7 @@ cmd_xhttp() {
             esac
             ;;
         *)
-            echo "usage: vpn xhttp on [PATH] [GET|POST|PUT]"
+            echo "usage: vpn xhttp on [PATH/] [GET|POST|PUT]"
             echo "       vpn xhttp off"
             echo "       vpn xhttp status"
             ;;
@@ -3228,7 +3362,7 @@ cmd_cdn() {
                 echo "origin remains: $(read_domain):$(get_public_port) $(get_xhttp_path)"
             else
                 echo "status: disabled"
-                echo "enable: vpn cdn xhttp CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PUBLIC_PATH]"
+                echo "enable: vpn cdn xhttp CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PUBLIC_PATH/]"
             fi
             print_line
             ;;
@@ -3272,7 +3406,7 @@ cmd_cdn() {
                 *) PATH_VALUE="/$PATH_VALUE" ;;
             esac
             if [ -z "$CDN_HOST_VALUE" ] || [ -z "$SNI_HOST_VALUE" ] || ! validate_port "$PORT_VALUE"; then
-                echo "usage: vpn cdn xhttp CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PUBLIC_PATH]"
+                echo "usage: vpn cdn xhttp CDN_HOST SNI_HOST [PORT] [TAG_SUFFIX] [PUBLIC_PATH/]"
                 return 0
             fi
             echo "$CDN_HOST_VALUE" > "$CDN_XHTTP_HOST_FILE"
@@ -3521,6 +3655,62 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+
+def xhttp_client_extra(method):
+    method = (method or "GET").upper()
+    if method not in ("GET", "POST", "PUT"):
+        method = "GET"
+    return {
+        "xmux": {
+            "cMaxReuseTimes": "48-96",
+            "maxConcurrency": "4-8",
+            "maxConnections": 0,
+            "hKeepAlivePeriod": 0,
+            "hMaxRequestTimes": "500-900",
+            "hMaxReusableSecs": "300-900",
+        },
+        "seqKey": "page",
+        "sessionKey": "X-Request-Id",
+        "xPaddingKey": "_dc",
+        "seqPlacement": "query",
+        "uplinkDataKey": "X-Payload",
+        "xPaddingBytes": "80-240",
+        "xPaddingMethod": "tokenish",
+        "uplinkChunkSize": "2048-3072",
+        "sessionPlacement": "header",
+        "uplinkHTTPMethod": method,
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "query",
+        "scMaxEachPostBytes": "4096-8192",
+        "uplinkDataPlacement": "header",
+    }
+
+
+def xhttp_extra_param(method):
+    extra = json.dumps(xhttp_client_extra(method), ensure_ascii=False, separators=(",", ":"))
+    return urllib.parse.quote(extra, safe="")
+
+
+def normalize_xhttp_path_py(path):
+    path = str(path or "/api/v1/sync/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
+    path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
+    extra = xhttp_extra_param(method)
+    tag = urllib.parse.quote(tag, safe="")
+    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if security == "tls":
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+    else:
+        url += "&security=none"
+    return url + f"#{tag}"
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 USERS_FILE = sys.argv[1]
@@ -3590,7 +3780,7 @@ CDN_WS_PATH_FILE = sys.argv[58]
 DEVICES_FILE = sys.argv[59]
 TRAFFIC_FILE = sys.argv[60]
 TRANSPORT = sys.argv[61] if len(sys.argv) > 61 else "ws"
-XHTTP_PATH = sys.argv[62] if len(sys.argv) > 62 and sys.argv[62] else "/api/v1/sync"
+XHTTP_PATH = sys.argv[62] if len(sys.argv) > 62 and sys.argv[62] else "/api/v1/sync/"
 XHTTP_METHOD = (sys.argv[63] if len(sys.argv) > 63 and sys.argv[63] else "GET").upper()
 CDN_XHTTP_ENABLED = len(sys.argv) > 64 and sys.argv[64] == "1"
 CDN_XHTTP_HOST = sys.argv[65] if len(sys.argv) > 65 else ""
@@ -3611,10 +3801,14 @@ if TRANSPORT != "xhttp":
     TRANSPORT = "ws"
 if not XHTTP_PATH.startswith("/"):
     XHTTP_PATH = "/" + XHTTP_PATH
+if not XHTTP_PATH.endswith("/"):
+    XHTTP_PATH += "/"
 if XHTTP_METHOD not in ("GET", "POST", "PUT"):
     XHTTP_METHOD = "GET"
 if not CDN_XHTTP_PUBLIC_PATH.startswith("/"):
     CDN_XHTTP_PUBLIC_PATH = "/" + CDN_XHTTP_PUBLIC_PATH
+if not CDN_XHTTP_PUBLIC_PATH.endswith("/"):
+    CDN_XHTTP_PUBLIC_PATH += "/"
 
 NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
@@ -4079,17 +4273,8 @@ def make_ws_link(user):
 def make_xhttp_link(user):
     client_id = str(user.get("uuid", ""))
     domain = read_domain()
-    tag = urllib.parse.quote(f"{read_node_name() or domain} XHTTP", safe="")
-    path = urllib.parse.quote(XHTTP_PATH, safe="")
-    if str(PUBLIC_PORT) == "443":
-        return (
-            f"vless://{client_id}@{domain}:{PUBLIC_PORT}"
-            f"?type=xhttp&security=tls&sni={domain}&host={domain}&path={path}&mode=packet-up&encryption=none#{tag}"
-        )
-    return (
-        f"vless://{client_id}@{domain}:{PUBLIC_PORT}"
-        f"?type=xhttp&security=none&host={domain}&path={path}&mode=packet-up&encryption=none#{tag}"
-    )
+    security = "tls" if str(PUBLIC_PORT) == "443" else "none"
+    return build_xhttp_vless(client_id, domain, PUBLIC_PORT, XHTTP_PATH, domain, f"{read_node_name() or domain} XHTTP", security=security, sni=domain, method=XHTTP_METHOD)
 
 
 def make_cdn_ws_link(user):
@@ -4108,13 +4293,8 @@ def make_cdn_xhttp_link(user):
     if not CDN_XHTTP_ENABLED or not CDN_XHTTP_HOST:
         return ""
     client_id = str(user.get("uuid", ""))
-    tag = urllib.parse.quote(f"{read_node_name() or read_domain()} {CDN_XHTTP_TAG}".strip().replace(" ", "-"), safe="")
-    return (
-        f"vless://{client_id}@{CDN_XHTTP_HOST}:{CDN_XHTTP_PORT}"
-        f"?type=xhttp&security=tls&sni={CDN_XHTTP_SNI}&host={CDN_XHTTP_SNI}"
-        f"&path={urllib.parse.quote(CDN_XHTTP_PUBLIC_PATH, safe='')}&mode=packet-up"
-        f"&encryption=none#{tag}"
-    )
+    tag = f"{read_node_name() or read_domain()} {CDN_XHTTP_TAG}".strip().replace(" ", "-")
+    return build_xhttp_vless(client_id, CDN_XHTTP_HOST, CDN_XHTTP_PORT, CDN_XHTTP_PUBLIC_PATH, CDN_XHTTP_SNI, tag, security="tls", sni=CDN_XHTTP_SNI, method=XHTTP_METHOD)
 
 
 def make_reality_link(user):
@@ -4324,15 +4504,25 @@ def write_config(users):
             "xhttpSettings": {
                 "mode": "packet-up",
                 "path": XHTTP_PATH,
-                "xPaddingKey": "_dc",
-                "xPaddingHeader": "X-Cache",
-                "xPaddingMethod": "tokenish",
-                "uplinkHTTPMethod": XHTTP_METHOD,
-                "xPaddingObfsMode": True,
-                "xPaddingPlacement": "queryInHeader",
-                "scMaxEachPostBytes": 524288,
-                "scMaxConcurrentPosts": 1,
-                "scMinPostsIntervalMs": 150,
+                "extra": {
+                    "seqKey": "page",
+                    "sessionKey": "X-Request-Id",
+                    "noSSEHeader": False,
+                    "xPaddingKey": "_dc",
+                    "seqPlacement": "query",
+                    "uplinkDataKey": "X-Payload",
+                    "xPaddingBytes": "80-240",
+                    "xPaddingMethod": "tokenish",
+                    "uplinkChunkSize": "2048-3072",
+                    "sessionPlacement": "header",
+                    "uplinkHTTPMethod": XHTTP_METHOD,
+                    "xPaddingObfsMode": True,
+                    "xPaddingPlacement": "query",
+                    "scMaxBufferedPosts": 30,
+                    "scMaxEachPostBytes": "4096-8192",
+                    "uplinkDataPlacement": "header",
+                    "serverMaxHeaderBytes": 32768,
+                },
             },
         }
     else:
@@ -4638,7 +4828,7 @@ function renderStats(status) {
     ["Clients", `${status.clients?.active || 0} active / ${status.clients?.total || 0} total`],
     ["Transport", transport.mode || "ws"],
     ["WS", `:${status.ws?.public_port || "-"}`],
-    ["XHTTP", transport.mode === "xhttp" ? (transport.xhttp_path || "/api/v1/sync") : "off"],
+    ["XHTTP", transport.mode === "xhttp" ? (transport.xhttp_path || "/api/v1/sync/") : "off"],
     ["WS-CDN", cdn.enabled ? `${cdn.host}:${cdn.port || 443} ${cdn.path || "/xray"}` : "off"],
     ["XHTTP-CDN", xcdn.enabled ? `${xcdn.host}:${xcdn.port || 443} ${xcdn.public_path || ""}` : "off"],
     ["Reality", status.reality?.enabled ? `:${status.reality.public_port}` : "off"],
@@ -5683,6 +5873,7 @@ start_sub_process() {
     CDN_WS_PATH_VALUE=""
     TRANSPORT_VALUE="$(get_transport)"
     XHTTP_PATH_VALUE="$(get_xhttp_path)"
+    XHTTP_METHOD_VALUE="$(get_xhttp_method)"
     CDN_XHTTP_ENABLED_VALUE="0"
     CDN_XHTTP_HOST_VALUE=""
     CDN_XHTTP_SNI_VALUE=""
@@ -5707,7 +5898,7 @@ start_sub_process() {
     fi
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
-    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$DEVICES_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$DEVICES_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY' &
 import base64
 import datetime
 import hashlib
@@ -5719,6 +5910,62 @@ import sys
 import time
 import urllib.parse
 import urllib.request
+
+def xhttp_client_extra(method):
+    method = (method or "GET").upper()
+    if method not in ("GET", "POST", "PUT"):
+        method = "GET"
+    return {
+        "xmux": {
+            "cMaxReuseTimes": "48-96",
+            "maxConcurrency": "4-8",
+            "maxConnections": 0,
+            "hKeepAlivePeriod": 0,
+            "hMaxRequestTimes": "500-900",
+            "hMaxReusableSecs": "300-900",
+        },
+        "seqKey": "page",
+        "sessionKey": "X-Request-Id",
+        "xPaddingKey": "_dc",
+        "seqPlacement": "query",
+        "uplinkDataKey": "X-Payload",
+        "xPaddingBytes": "80-240",
+        "xPaddingMethod": "tokenish",
+        "uplinkChunkSize": "2048-3072",
+        "sessionPlacement": "header",
+        "uplinkHTTPMethod": method,
+        "xPaddingObfsMode": True,
+        "xPaddingPlacement": "query",
+        "scMaxEachPostBytes": "4096-8192",
+        "uplinkDataPlacement": "header",
+    }
+
+
+def xhttp_extra_param(method):
+    extra = json.dumps(xhttp_client_extra(method), ensure_ascii=False, separators=(",", ":"))
+    return urllib.parse.quote(extra, safe="")
+
+
+def normalize_xhttp_path_py(path):
+    path = str(path or "/api/v1/sync/").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
+    path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
+    extra = xhttp_extra_param(method)
+    tag = urllib.parse.quote(tag, safe="")
+    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if security == "tls":
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+    else:
+        url += "&security=none"
+    return url + f"#{tag}"
+
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 USERS_FILE = sys.argv[1]
@@ -5745,19 +5992,26 @@ CDN_WS_TAG = sys.argv[21] or "CDN"
 CDN_WS_PATH = sys.argv[22] or "/xray"
 DEVICES_FILE = sys.argv[23]
 TRANSPORT = sys.argv[24] if len(sys.argv) > 24 else "ws"
-XHTTP_PATH = sys.argv[25] if len(sys.argv) > 25 and sys.argv[25] else "/api/v1/sync"
-CDN_XHTTP_ENABLED = len(sys.argv) > 26 and sys.argv[26] == "1"
-CDN_XHTTP_HOST = sys.argv[27] if len(sys.argv) > 27 else ""
-CDN_XHTTP_SNI = (sys.argv[28] if len(sys.argv) > 28 else "") or CDN_XHTTP_HOST
-CDN_XHTTP_PORT = (sys.argv[29] if len(sys.argv) > 29 else "") or "443"
-CDN_XHTTP_TAG = (sys.argv[30] if len(sys.argv) > 30 else "") or "CDN"
-CDN_XHTTP_PUBLIC_PATH = (sys.argv[31] if len(sys.argv) > 31 and sys.argv[31] else "") or XHTTP_PATH
+XHTTP_PATH = sys.argv[25] if len(sys.argv) > 25 and sys.argv[25] else "/api/v1/sync/"
+XHTTP_METHOD = (sys.argv[26] if len(sys.argv) > 26 and sys.argv[26] else "GET").upper()
+CDN_XHTTP_ENABLED = len(sys.argv) > 27 and sys.argv[27] == "1"
+CDN_XHTTP_HOST = sys.argv[28] if len(sys.argv) > 28 else ""
+CDN_XHTTP_SNI = (sys.argv[29] if len(sys.argv) > 29 else "") or CDN_XHTTP_HOST
+CDN_XHTTP_PORT = (sys.argv[30] if len(sys.argv) > 30 else "") or "443"
+CDN_XHTTP_TAG = (sys.argv[31] if len(sys.argv) > 31 else "") or "CDN"
+CDN_XHTTP_PUBLIC_PATH = (sys.argv[32] if len(sys.argv) > 32 and sys.argv[32] else "") or XHTTP_PATH
 if TRANSPORT != "xhttp":
     TRANSPORT = "ws"
 if not XHTTP_PATH.startswith("/"):
     XHTTP_PATH = "/" + XHTTP_PATH
+if not XHTTP_PATH.endswith("/"):
+    XHTTP_PATH += "/"
+if XHTTP_METHOD not in ("GET", "POST", "PUT"):
+    XHTTP_METHOD = "GET"
 if not CDN_XHTTP_PUBLIC_PATH.startswith("/"):
     CDN_XHTTP_PUBLIC_PATH = "/" + CDN_XHTTP_PUBLIC_PATH
+if not CDN_XHTTP_PUBLIC_PATH.endswith("/"):
+    CDN_XHTTP_PUBLIC_PATH += "/"
 LAST_ON_DEMAND_SYNC = 0
 
 
@@ -6093,17 +6347,8 @@ def make_links(user):
             f"vless://{client_id}@{domain}:{WS_PUBLIC_PORT}"
             f"?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         )
-    xhttp_path = urllib.parse.quote(XHTTP_PATH, safe="")
-    if str(WS_PUBLIC_PORT) == "443":
-        xhttp = (
-            f"vless://{client_id}@{domain}:{WS_PUBLIC_PORT}"
-            f"?type=xhttp&security=tls&sni={domain}&host={domain}&path={xhttp_path}&mode=packet-up&encryption=none#{xhttp_tag}"
-        )
-    else:
-        xhttp = (
-            f"vless://{client_id}@{domain}:{WS_PUBLIC_PORT}"
-            f"?type=xhttp&security=none&host={domain}&path={xhttp_path}&mode=packet-up&encryption=none#{xhttp_tag}"
-        )
+    security = "tls" if str(WS_PUBLIC_PORT) == "443" else "none"
+    xhttp = build_xhttp_vless(client_id, domain, WS_PUBLIC_PORT, XHTTP_PATH, domain, f"{node_name()} XHTTP", security=security, sni=domain, method=XHTTP_METHOD)
     links = [xhttp if TRANSPORT == "xhttp" else ws]
     if CDN_WS_ENABLED and CDN_WS_HOST:
         cdn_tag = urllib.parse.quote(f"{node_name()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
@@ -6113,13 +6358,8 @@ def make_links(user):
             f"&host={CDN_WS_SNI}&encryption=none#{cdn_tag}"
         )
     if CDN_XHTTP_ENABLED and CDN_XHTTP_HOST:
-        cdn_tag = urllib.parse.quote(f"{node_name()} {CDN_XHTTP_TAG}".strip().replace(" ", "-"), safe="")
-        links.append(
-            f"vless://{client_id}@{CDN_XHTTP_HOST}:{CDN_XHTTP_PORT}"
-            f"?type=xhttp&security=tls&sni={CDN_XHTTP_SNI}&host={CDN_XHTTP_SNI}"
-            f"&path={urllib.parse.quote(CDN_XHTTP_PUBLIC_PATH, safe='')}&mode=packet-up"
-            f"&encryption=none#{cdn_tag}"
-        )
+        cdn_tag = f"{node_name()} {CDN_XHTTP_TAG}".strip().replace(" ", "-")
+        links.append(build_xhttp_vless(client_id, CDN_XHTTP_HOST, CDN_XHTTP_PORT, CDN_XHTTP_PUBLIC_PATH, CDN_XHTTP_SNI, cdn_tag, security="tls", sni=CDN_XHTTP_SNI, method=XHTTP_METHOD))
     if REALITY_ENABLED:
         reality_tag = urllib.parse.quote(f"{node_name()} Reality", safe="")
         reality = (
