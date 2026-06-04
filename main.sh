@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.04-xhttp-extra"
+SCRIPT_VERSION="2026.06.04-xhttp-cdnmd-light"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -1420,7 +1420,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "2048-3072",
+        "uplinkChunkSize": "1024-2048",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -1450,7 +1450,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -1842,7 +1842,7 @@ if transport == "xhttp":
                 "uplinkDataKey": "X-Payload",
                 "xPaddingBytes": "80-240",
                 "xPaddingMethod": "tokenish",
-                "uplinkChunkSize": "2048-3072",
+                "uplinkChunkSize": "1024-2048",
                 "sessionPlacement": "header",
                 "uplinkHTTPMethod": xhttp_method,
                 "xPaddingObfsMode": True,
@@ -2040,7 +2040,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "2048-3072",
+        "uplinkChunkSize": "1024-2048",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -2070,7 +2070,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -3680,7 +3680,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "2048-3072",
+        "uplinkChunkSize": "1024-2048",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -3710,7 +3710,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -4518,7 +4518,7 @@ def write_config(users):
                     "uplinkDataKey": "X-Payload",
                     "xPaddingBytes": "80-240",
                     "xPaddingMethod": "tokenish",
-                    "uplinkChunkSize": "2048-3072",
+                    "uplinkChunkSize": "1024-2048",
                     "sessionPlacement": "header",
                     "uplinkHTTPMethod": XHTTP_METHOD,
                     "xPaddingObfsMode": True,
@@ -5936,7 +5936,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "2048-3072",
+        "uplinkChunkSize": "1024-2048",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -5966,7 +5966,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=h2%2Chttp%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
     else:
         url += "&security=none"
     return url + f"#{tag}"
