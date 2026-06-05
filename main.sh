@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.04-xhttp-cdnmd-light"
+SCRIPT_VERSION="2026.06.05-xhttp-tags"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -52,6 +52,9 @@ CDN_XHTTP_SNI_FILE="$DATA_DIR/cdn_xhttp_sni.txt"
 CDN_XHTTP_PORT_FILE="$DATA_DIR/cdn_xhttp_port.txt"
 CDN_XHTTP_TAG_FILE="$DATA_DIR/cdn_xhttp_tag.txt"
 CDN_XHTTP_PUBLIC_PATH_FILE="$DATA_DIR/cdn_xhttp_public_path.txt"
+TAG_WS_FILE="$DATA_DIR/tag_ws.txt"
+TAG_XHTTP_FILE="$DATA_DIR/tag_xhttp.txt"
+TAG_REALITY_FILE="$DATA_DIR/tag_reality.txt"
 PEERS_FILE="$DATA_DIR/peers.txt"
 NODES_FILE="$DATA_DIR/nodes.json"
 JOIN_TOKEN_FILE="$DATA_DIR/join_token.txt"
@@ -357,6 +360,56 @@ get_node_name() {
     fi
 
     read_domain
+    return 0
+}
+
+tag_file_for() {
+    case "$1" in
+        ws) echo "$TAG_WS_FILE" ;;
+        xhttp) echo "$TAG_XHTTP_FILE" ;;
+        reality) echo "$TAG_REALITY_FILE" ;;
+        cdn-ws|ws-cdn) echo "$CDN_WS_TAG_FILE" ;;
+        cdn-xhttp|xhttp-cdn|cdn) echo "$CDN_XHTTP_TAG_FILE" ;;
+        *) echo "" ;;
+    esac
+}
+
+default_tag_for() {
+    case "$1" in
+        ws) echo "WS" ;;
+        xhttp) echo "XHTTP" ;;
+        reality) echo "Reality" ;;
+        cdn-ws|ws-cdn|cdn-xhttp|xhttp-cdn|cdn) echo "CDN" ;;
+        *) echo "" ;;
+    esac
+}
+
+get_link_tag() {
+    local KIND="$1"
+    local FILE DEFAULT_VALUE
+
+    FILE="$(tag_file_for "$KIND")"
+    DEFAULT_VALUE="$(default_tag_for "$KIND")"
+    if [ -n "$FILE" ] && [ -f "$FILE" ] && [ -s "$FILE" ]; then
+        head -n 1 "$FILE"
+        return 0
+    fi
+
+    echo "$DEFAULT_VALUE"
+    return 0
+}
+
+set_link_tag() {
+    local KIND="$1"
+    local VALUE="$2"
+    local FILE
+
+    FILE="$(tag_file_for "$KIND")"
+    if [ -z "$FILE" ]; then
+        return 1
+    fi
+
+    printf '%s\n' "$VALUE" > "$FILE"
     return 0
 }
 
@@ -1400,6 +1453,23 @@ import sys
 import time
 import urllib.parse
 
+def read_tag_suffix(name, default):
+    try:
+        with open(name, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return default
+
+
+def link_tag(base, suffix):
+    base = str(base or "").strip()
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return base
+    if suffix[:1] in ("-", "_", "/", "#", "(", "["):
+        return base + suffix
+    return (base + " " + suffix).strip()
+
 def xhttp_client_extra(method):
     method = (method or "GET").upper()
     if method not in ("GET", "POST", "PUT"):
@@ -1450,7 +1520,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -1486,6 +1556,9 @@ cdn_xhttp_sni = (sys.argv[28] if len(sys.argv) > 28 else "") or cdn_xhttp_host
 cdn_xhttp_port = (sys.argv[29] if len(sys.argv) > 29 else "") or "443"
 cdn_xhttp_tag_suffix = (sys.argv[30] if len(sys.argv) > 30 else "") or "CDN"
 cdn_xhttp_public_path = (sys.argv[31] if len(sys.argv) > 31 else "") or xhttp_path
+tag_ws = read_tag_suffix("tag_ws.txt", "WS")
+tag_xhttp = read_tag_suffix("tag_xhttp.txt", "XHTTP")
+tag_reality = read_tag_suffix("tag_reality.txt", "Reality")
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
 if not xhttp_path.endswith("/"):
@@ -1541,20 +1614,20 @@ if cdn_xhttp_enabled:
 lines.append(" ")
 
 def ws_link(name, uuid):
-    tag = urllib.parse.quote(f"{node_name} WS", safe="")
+    tag = urllib.parse.quote(link_tag(node_name, tag_ws), safe="")
     if str(ws_port) == "443":
         return f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=tls&sni={domain}&host={domain}&path=%2Fxray&encryption=none#{tag}"
     return f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{tag}"
 
 def xhttp_link(name, uuid):
-    tag = f"{node_name} XHTTP"
+    tag = link_tag(node_name, tag_xhttp)
     security = "tls" if str(ws_port) == "443" else "none"
     return build_xhttp_vless(uuid, domain, ws_port, xhttp_path, domain, tag, security=security, sni=domain, method=xhttp_method)
 
 def cdn_ws_link(name, uuid):
     if not cdn_ws_enabled or not cdn_ws_host:
         return ""
-    tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
+    tag = urllib.parse.quote(link_tag(link_tag(node_name, tag_ws), cdn_ws_tag_suffix).replace(" ", "-"), safe="")
     return (
         f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
         f"?security=tls&sni={cdn_ws_sni}&type=ws&path={urllib.parse.quote(cdn_ws_path, safe='')}"
@@ -1564,11 +1637,11 @@ def cdn_ws_link(name, uuid):
 def cdn_xhttp_link(name, uuid):
     if not cdn_xhttp_enabled or not cdn_xhttp_host:
         return ""
-    tag = f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-")
+    tag = link_tag(node_name, cdn_xhttp_tag_suffix).replace(" ", "-")
     return build_xhttp_vless(uuid, cdn_xhttp_host, cdn_xhttp_port, cdn_xhttp_public_path, cdn_xhttp_sni, tag, security="tls", sni=cdn_xhttp_sni, method=xhttp_method)
 
 def reality_link(name, uuid):
-    tag = urllib.parse.quote(f"{node_name} Reality", safe="")
+    tag = urllib.parse.quote(link_tag(node_name, tag_reality), safe="")
     return (
         f"vless://{uuid}@{reality_host}:{reality_port}"
         f"?type=tcp&security=reality&pbk={reality_public_key}&fp=chrome"
@@ -2020,6 +2093,23 @@ make_link() {
 import json, sys
 import urllib.parse
 
+def read_tag_suffix(name, default):
+    try:
+        with open(name, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return default
+
+
+def link_tag(base, suffix):
+    base = str(base or "").strip()
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return base
+    if suffix[:1] in ("-", "_", "/", "#", "(", "["):
+        return base + suffix
+    return (base + " " + suffix).strip()
+
 def xhttp_client_extra(method):
     method = (method or "GET").upper()
     if method not in ("GET", "POST", "PUT"):
@@ -2070,7 +2160,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -2102,6 +2192,9 @@ cdn_xhttp_sni = (sys.argv[24] if len(sys.argv) > 24 else "") or cdn_xhttp_host
 cdn_xhttp_port = (sys.argv[25] if len(sys.argv) > 25 else "") or "443"
 cdn_xhttp_tag_suffix = (sys.argv[26] if len(sys.argv) > 26 else "") or "CDN"
 cdn_xhttp_public_path = (sys.argv[27] if len(sys.argv) > 27 else "") or xhttp_path
+tag_ws = read_tag_suffix("tag_ws.txt", "WS")
+tag_xhttp = read_tag_suffix("tag_xhttp.txt", "XHTTP")
+tag_reality = read_tag_suffix("tag_reality.txt", "Reality")
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
 if not xhttp_path.endswith("/"):
@@ -2125,21 +2218,21 @@ for u in users:
             print("user is banned")
             sys.exit(2)
         uuid = u.get("uuid")
-        ws_tag = urllib.parse.quote(f"{node_name} WS", safe="")
+        ws_tag = urllib.parse.quote(link_tag(node_name, tag_ws), safe="")
         if str(ws_port) == "443":
             ws_link = f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=tls&sni={domain}&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         else:
             ws_link = f"vless://{uuid}@{domain}:{ws_port}?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         if transport == "xhttp":
             security = "tls" if str(ws_port) == "443" else "none"
-            xhttp_link = build_xhttp_vless(uuid, domain, ws_port, xhttp_path, domain, f"{node_name} XHTTP", security=security, sni=domain, method=xhttp_method)
+            xhttp_link = build_xhttp_vless(uuid, domain, ws_port, xhttp_path, domain, link_tag(node_name, tag_xhttp), security=security, sni=domain, method=xhttp_method)
             print("xhttp:")
             print(xhttp_link)
         else:
             print("ws:")
             print(ws_link)
         if cdn_ws_enabled and cdn_ws_host:
-            cdn_tag = urllib.parse.quote(f"{node_name} WS {cdn_ws_tag_suffix}".strip().replace(" ", "-"), safe="")
+            cdn_tag = urllib.parse.quote(link_tag(link_tag(node_name, tag_ws), cdn_ws_tag_suffix).replace(" ", "-"), safe="")
             cdn_link = (
                 f"vless://{uuid}@{cdn_ws_host}:{cdn_ws_port}"
                 f"?security=tls&sni={cdn_ws_sni}&type=ws&path={urllib.parse.quote(cdn_ws_path, safe='')}"
@@ -2148,11 +2241,11 @@ for u in users:
             print("ws-cdn:")
             print(cdn_link)
         if cdn_xhttp_enabled and cdn_xhttp_host:
-            cdn_link = build_xhttp_vless(uuid, cdn_xhttp_host, cdn_xhttp_port, cdn_xhttp_public_path, cdn_xhttp_sni, f"{node_name} {cdn_xhttp_tag_suffix}".strip().replace(" ", "-"), security="tls", sni=cdn_xhttp_sni, method=xhttp_method)
+            cdn_link = build_xhttp_vless(uuid, cdn_xhttp_host, cdn_xhttp_port, cdn_xhttp_public_path, cdn_xhttp_sni, link_tag(node_name, cdn_xhttp_tag_suffix).replace(" ", "-"), security="tls", sni=cdn_xhttp_sni, method=xhttp_method)
             print("xhttp-cdn:")
             print(cdn_link)
         if reality_enabled:
-            reality_tag = urllib.parse.quote(f"{node_name} Reality", safe="")
+            reality_tag = urllib.parse.quote(link_tag(node_name, tag_reality), safe="")
             reality_link = (
                 f"vless://{uuid}@{reality_host}:{reality_port}"
                 f"?type=tcp&security=reality&pbk={reality_public_key}&fp=chrome"
@@ -2239,6 +2332,9 @@ cmd_help() {
     echo "vpn keys                   show all keys and recent logs"
     echo "vpn logs [COUNT]           show action logs"
     echo "vpn node NAME              set node/location name for link tags"
+    echo "vpn tag status             show link name suffixes"
+    echo "vpn tag ws|xhttp|reality VALUE"
+    echo "vpn tag cdn|cdn-ws|cdn-xhttp VALUE"
     echo "vpn cdn HOST SNI [PORT]    add WS-CDN links for all clients"
     echo "vpn cdn HOST SNI PORT TAG PATH"
     echo "vpn cdn xhttp HOST SNI PORT TAG PATH"
@@ -3109,6 +3205,79 @@ cmd_domain() {
     return 0
 }
 
+cmd_tag() {
+    local ACTION="${1:-status}"
+    local VALUE FILE
+
+    case "$ACTION" in
+        status|"")
+            print_line
+            echo "Link tag suffixes"
+            print_line
+            echo "ws: $(get_link_tag ws)"
+            echo "xhttp: $(get_link_tag xhttp)"
+            echo "reality: $(get_link_tag reality)"
+            echo "cdn-ws: $(get_link_tag cdn-ws)"
+            echo "cdn-xhttp: $(get_link_tag cdn-xhttp)"
+            print_line
+            echo "examples:"
+            echo "vpn tag xhttp Fast"
+            echo "vpn tag ws \"\""
+            echo "vpn tag reality REAL"
+            echo "vpn tag cdn Budget"
+            print_line
+            ;;
+        reset|defaults)
+            rm -f "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" >/dev/null 2>&1
+            rm -f "$CDN_WS_TAG_FILE" "$CDN_XHTTP_TAG_FILE" >/dev/null 2>&1
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            remember_users_state
+            log_action "tag_reset" ""
+            echo "tag suffixes reset"
+            ;;
+        ws|xhttp|reality|cdn-ws|ws-cdn|cdn-xhttp|xhttp-cdn)
+            shift
+            VALUE="$(strip_outer_quotes "$*")"
+            if ! set_link_tag "$ACTION" "$VALUE"; then
+                echo "unknown tag kind: $ACTION"
+                return 0
+            fi
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            remember_users_state
+            log_action "tag_set" "$ACTION=$VALUE"
+            echo "tag saved: $ACTION = $VALUE"
+            ;;
+        cdn)
+            shift
+            VALUE="$(strip_outer_quotes "$*")"
+            echo "$VALUE" > "$CDN_WS_TAG_FILE"
+            echo "$VALUE" > "$CDN_XHTTP_TAG_FILE"
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            remember_users_state
+            log_action "tag_set" "cdn=$VALUE"
+            echo "tag saved: cdn-ws/cdn-xhttp = $VALUE"
+            ;;
+        help|*)
+            echo "vpn tag status"
+            echo "vpn tag ws VALUE"
+            echo "vpn tag xhttp VALUE"
+            echo "vpn tag reality VALUE"
+            echo "vpn tag cdn VALUE              set both CDN suffixes"
+            echo "vpn tag cdn-ws VALUE"
+            echo "vpn tag cdn-xhttp VALUE"
+            echo "vpn tag reset"
+            ;;
+    esac
+
+    return 0
+}
+
 cmd_reality() {
     ACTION="${1:-}"
 
@@ -3660,6 +3829,23 @@ import urllib.request
 import uuid
 import zipfile
 
+def read_tag_suffix(name, default):
+    try:
+        with open(name, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return default
+
+
+def link_tag(base, suffix):
+    base = str(base or "").strip()
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return base
+    if suffix[:1] in ("-", "_", "/", "#", "(", "["):
+        return base + suffix
+    return (base + " " + suffix).strip()
+
 def xhttp_client_extra(method):
     method = (method or "GET").upper()
     if method not in ("GET", "POST", "PUT"):
@@ -3710,7 +3896,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -4262,7 +4448,7 @@ def make_ws_link(user):
     name = str(user.get("name", ""))
     client_id = str(user.get("uuid", ""))
     domain = read_domain()
-    tag = urllib.parse.quote(f"{read_node_name() or domain} WS", safe="")
+    tag = urllib.parse.quote(link_tag(read_node_name() or domain, read_tag_suffix("tag_ws.txt", "WS")), safe="")
     if str(PUBLIC_PORT) == "443":
         return (
             f"vless://{client_id}@{domain}:{PUBLIC_PORT}"
@@ -4278,14 +4464,14 @@ def make_xhttp_link(user):
     client_id = str(user.get("uuid", ""))
     domain = read_domain()
     security = "tls" if str(PUBLIC_PORT) == "443" else "none"
-    return build_xhttp_vless(client_id, domain, PUBLIC_PORT, XHTTP_PATH, domain, f"{read_node_name() or domain} XHTTP", security=security, sni=domain, method=XHTTP_METHOD)
+    return build_xhttp_vless(client_id, domain, PUBLIC_PORT, XHTTP_PATH, domain, link_tag(read_node_name() or domain, read_tag_suffix("tag_xhttp.txt", "XHTTP")), security=security, sni=domain, method=XHTTP_METHOD)
 
 
 def make_cdn_ws_link(user):
     if not CDN_WS_ENABLED or not CDN_WS_HOST:
         return ""
     client_id = str(user.get("uuid", ""))
-    tag = urllib.parse.quote(f"{read_node_name() or read_domain()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
+    tag = urllib.parse.quote(link_tag(link_tag(read_node_name() or read_domain(), read_tag_suffix("tag_ws.txt", "WS")), CDN_WS_TAG).replace(" ", "-"), safe="")
     return (
         f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
         f"?security=tls&sni={CDN_WS_SNI}&type=ws&path={urllib.parse.quote(CDN_WS_PATH, safe='')}"
@@ -4297,7 +4483,7 @@ def make_cdn_xhttp_link(user):
     if not CDN_XHTTP_ENABLED or not CDN_XHTTP_HOST:
         return ""
     client_id = str(user.get("uuid", ""))
-    tag = f"{read_node_name() or read_domain()} {CDN_XHTTP_TAG}".strip().replace(" ", "-")
+    tag = link_tag(read_node_name() or read_domain(), CDN_XHTTP_TAG).replace(" ", "-")
     return build_xhttp_vless(client_id, CDN_XHTTP_HOST, CDN_XHTTP_PORT, CDN_XHTTP_PUBLIC_PATH, CDN_XHTTP_SNI, tag, security="tls", sni=CDN_XHTTP_SNI, method=XHTTP_METHOD)
 
 
@@ -4307,7 +4493,7 @@ def make_reality_link(user):
     name = str(user.get("name", ""))
     client_id = str(user.get("uuid", ""))
     host = REALITY_PUBLIC_HOST or read_domain()
-    tag = urllib.parse.quote(f"{read_node_name() or read_domain()} Reality", safe="")
+    tag = urllib.parse.quote(link_tag(read_node_name() or read_domain(), read_tag_suffix("tag_reality.txt", "Reality")), safe="")
     return (
         f"vless://{client_id}@{host}:{PUBLIC_REALITY_PORT}"
         f"?type=tcp&security=reality&pbk={REALITY_PUBLIC_KEY}&fp=chrome"
@@ -5916,6 +6102,23 @@ import time
 import urllib.parse
 import urllib.request
 
+def read_tag_suffix(name, default):
+    try:
+        with open(name, "r", encoding="utf-8") as f:
+            return f.readline().strip()
+    except Exception:
+        return default
+
+
+def link_tag(base, suffix):
+    base = str(base or "").strip()
+    suffix = str(suffix or "").strip()
+    if not suffix:
+        return base
+    if suffix[:1] in ("-", "_", "/", "#", "(", "["):
+        return base + suffix
+    return (base + " " + suffix).strip()
+
 def xhttp_client_extra(method):
     method = (method or "GET").upper()
     if method not in ("GET", "POST", "PUT"):
@@ -5966,7 +6169,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -6339,8 +6542,11 @@ def make_links(user):
     reality_short_id = read_first(REALITY_SHORT_ID_FILE)
     reality_sni = read_first(REALITY_SNI_FILE, "proxy11.h1guro.ovh")
     reality_public_port = read_first(REALITY_PUBLIC_PORT_FILE, "443")
-    ws_tag = urllib.parse.quote(f"{node_name()} WS", safe="")
-    xhttp_tag = urllib.parse.quote(f"{node_name()} XHTTP", safe="")
+    tag_ws = read_tag_suffix("tag_ws.txt", "WS")
+    tag_xhttp = read_tag_suffix("tag_xhttp.txt", "XHTTP")
+    tag_reality = read_tag_suffix("tag_reality.txt", "Reality")
+    ws_tag = urllib.parse.quote(link_tag(node_name(), tag_ws), safe="")
+    xhttp_tag = urllib.parse.quote(link_tag(node_name(), tag_xhttp), safe="")
 
     if str(WS_PUBLIC_PORT) == "443":
         ws = (
@@ -6353,20 +6559,20 @@ def make_links(user):
             f"?type=ws&security=none&host={domain}&path=%2Fxray&encryption=none#{ws_tag}"
         )
     security = "tls" if str(WS_PUBLIC_PORT) == "443" else "none"
-    xhttp = build_xhttp_vless(client_id, domain, WS_PUBLIC_PORT, XHTTP_PATH, domain, f"{node_name()} XHTTP", security=security, sni=domain, method=XHTTP_METHOD)
+    xhttp = build_xhttp_vless(client_id, domain, WS_PUBLIC_PORT, XHTTP_PATH, domain, link_tag(node_name(), tag_xhttp), security=security, sni=domain, method=XHTTP_METHOD)
     links = [xhttp if TRANSPORT == "xhttp" else ws]
     if CDN_WS_ENABLED and CDN_WS_HOST:
-        cdn_tag = urllib.parse.quote(f"{node_name()} WS {CDN_WS_TAG}".strip().replace(" ", "-"), safe="")
+        cdn_tag = urllib.parse.quote(link_tag(link_tag(node_name(), tag_ws), CDN_WS_TAG).replace(" ", "-"), safe="")
         links.append(
             f"vless://{client_id}@{CDN_WS_HOST}:{CDN_WS_PORT}"
             f"?security=tls&sni={CDN_WS_SNI}&type=ws&path={urllib.parse.quote(CDN_WS_PATH, safe='')}"
             f"&host={CDN_WS_SNI}&encryption=none#{cdn_tag}"
         )
     if CDN_XHTTP_ENABLED and CDN_XHTTP_HOST:
-        cdn_tag = f"{node_name()} {CDN_XHTTP_TAG}".strip().replace(" ", "-")
+        cdn_tag = link_tag(node_name(), CDN_XHTTP_TAG).replace(" ", "-")
         links.append(build_xhttp_vless(client_id, CDN_XHTTP_HOST, CDN_XHTTP_PORT, CDN_XHTTP_PUBLIC_PATH, CDN_XHTTP_SNI, cdn_tag, security="tls", sni=CDN_XHTTP_SNI, method=XHTTP_METHOD))
     if REALITY_ENABLED:
-        reality_tag = urllib.parse.quote(f"{node_name()} Reality", safe="")
+        reality_tag = urllib.parse.quote(link_tag(node_name(), tag_reality), safe="")
         reality = (
             f"vless://{client_id}@{reality_host}:{reality_public_port}"
             f"?type=tcp&security=reality&pbk={reality_public_key}&fp=chrome"
@@ -7541,7 +7747,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -7590,6 +7796,7 @@ allowed = {
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
     "cdn_xhttp_enabled.txt", "cdn_xhttp_host.txt", "cdn_xhttp_sni.txt", "cdn_xhttp_port.txt", "cdn_xhttp_tag.txt", "cdn_xhttp_public_path.txt",
+    "tag_ws.txt", "tag_xhttp.txt", "tag_reality.txt",
     "reality_enabled.txt", "reality_private_key.txt", "reality_public_key.txt",
     "reality_short_id.txt", "reality_sni.txt", "reality_dest.txt",
     "reality_port.txt", "reality_public_port.txt", "public_ip.txt",
@@ -8207,6 +8414,50 @@ cmd_ports() {
     return 0
 }
 
+cmd_status() {
+    print_line
+    echo "H1Cloud VPN status"
+    print_line
+    echo "version: $SCRIPT_VERSION"
+    echo "node: $(get_node_name)"
+    echo "domain: $(read_domain)"
+    echo "transport: $(get_transport)"
+    if [ "$(get_transport)" = "xhttp" ]; then
+        echo "xhttp_path: $(get_xhttp_path)"
+        echo "xhttp_method: $(get_xhttp_method)"
+    else
+        echo "ws_path: /xray"
+    fi
+    if is_cdn_xhttp_enabled; then
+        echo "cdn_xhttp: $(get_cdn_xhttp_host):$(get_cdn_xhttp_port) sni=$(get_cdn_xhttp_sni) path=$(get_cdn_xhttp_public_path)"
+    else
+        echo "cdn_xhttp: off"
+    fi
+    if is_cdn_ws_enabled; then
+        echo "cdn_ws: $(get_cdn_ws_host):$(get_cdn_ws_port) sni=$(get_cdn_ws_sni) path=$(get_cdn_ws_path)"
+    else
+        echo "cdn_ws: off"
+    fi
+    if is_reality_enabled; then
+        echo "reality: local=$(get_reality_port) public=$(get_public_reality_port) sni=$(get_reality_sni)"
+    else
+        echo "reality: off"
+    fi
+    if api_is_running; then
+        echo "api: running port=$(saved_api_port)"
+    else
+        echo "api: stopped saved_port=$(saved_api_port)"
+    fi
+    if sub_is_running; then
+        echo "subscription: running port=$(saved_sub_port)"
+    else
+        echo "subscription: stopped saved_port=$(saved_sub_port)"
+    fi
+    print_line
+    cmd_ports
+    return 0
+}
+
 sync_external_user_changes() {
     CURRENT_USERS_STATE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
 
@@ -8313,6 +8564,9 @@ handle_cmd() {
         info)
             cmd_info "${2:-}"
             ;;
+        status)
+            cmd_status
+            ;;
         link)
             make_link "${2:-}" || true
             ;;
@@ -8328,6 +8582,10 @@ handle_cmd() {
         node)
             shift
             cmd_node "$*"
+            ;;
+        tag|tags|label|labels)
+            shift
+            cmd_tag "$@"
             ;;
         cdn|ws-cdn|manual)
             shift
