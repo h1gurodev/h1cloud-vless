@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.05-xhttp-alpn"
+SCRIPT_VERSION="2026.06.05-mws-xhttp"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -41,6 +41,10 @@ TRANSPORT_FILE="$DATA_DIR/transport.txt"
 XHTTP_PATH_FILE="$DATA_DIR/xhttp_path.txt"
 XHTTP_METHOD_FILE="$DATA_DIR/xhttp_method.txt"
 XHTTP_ALPN_FILE="$DATA_DIR/xhttp_alpn.txt"
+MWS_ENABLED_FILE="$DATA_DIR/mws_enabled.txt"
+MWS_DOMAIN_FILE="$DATA_DIR/mws_domain.txt"
+MWS_CERT_FILE="$DATA_DIR/mws_cert_file.txt"
+MWS_KEY_FILE="$DATA_DIR/mws_key_file.txt"
 CDN_WS_ENABLED_FILE="$DATA_DIR/cdn_ws_enabled.txt"
 CDN_WS_HOST_FILE="$DATA_DIR/cdn_ws_host.txt"
 CDN_WS_SNI_FILE="$DATA_DIR/cdn_ws_sni.txt"
@@ -795,6 +799,76 @@ set_xhttp_alpn() {
     fi
 
     echo "$ALPN_VALUE" > "$XHTTP_ALPN_FILE"
+    return 0
+}
+
+is_mws_enabled() {
+    local VALUE
+
+    VALUE="${MWS_ENABLED:-${VPN_MWS_ENABLED:-}}"
+    if [ -n "$VALUE" ]; then
+        is_enabled_value "$VALUE" && return 0
+        is_disabled_value "$VALUE" && return 1
+    fi
+
+    if [ -f "$MWS_ENABLED_FILE" ] && [ -s "$MWS_ENABLED_FILE" ]; then
+        VALUE="$(head -n 1 "$MWS_ENABLED_FILE" 2>/dev/null)"
+        is_enabled_value "$VALUE" && return 0
+    fi
+
+    return 1
+}
+
+get_mws_domain() {
+    local VALUE
+
+    VALUE="${MWS_DOMAIN:-${VPN_MWS_DOMAIN:-}}"
+    if [ -z "$VALUE" ] && [ -f "$MWS_DOMAIN_FILE" ] && [ -s "$MWS_DOMAIN_FILE" ]; then
+        VALUE="$(head -n 1 "$MWS_DOMAIN_FILE" 2>/dev/null)"
+    fi
+    if [ -z "$VALUE" ]; then
+        VALUE="$(get_domain)"
+    fi
+    normalize_domain "$VALUE"
+    return 0
+}
+
+get_mws_cert_file() {
+    local VALUE DOMAIN_VALUE
+
+    VALUE="${MWS_CERT_PATH:-${VPN_MWS_CERT_PATH:-}}"
+    if [ -z "$VALUE" ] && [ -f "$MWS_CERT_FILE" ] && [ -s "$MWS_CERT_FILE" ]; then
+        VALUE="$(head -n 1 "$MWS_CERT_FILE" 2>/dev/null)"
+    fi
+    if [ -z "$VALUE" ]; then
+        DOMAIN_VALUE="$(get_mws_domain)"
+        VALUE="/etc/letsencrypt/live/$DOMAIN_VALUE/fullchain.pem"
+    fi
+    strip_outer_quotes "$VALUE"
+    return 0
+}
+
+get_mws_key_file() {
+    local VALUE DOMAIN_VALUE
+
+    VALUE="${MWS_KEY_PATH:-${VPN_MWS_KEY_PATH:-}}"
+    if [ -z "$VALUE" ] && [ -f "$MWS_KEY_FILE" ] && [ -s "$MWS_KEY_FILE" ]; then
+        VALUE="$(head -n 1 "$MWS_KEY_FILE" 2>/dev/null)"
+    fi
+    if [ -z "$VALUE" ]; then
+        DOMAIN_VALUE="$(get_mws_domain)"
+        VALUE="/etc/letsencrypt/live/$DOMAIN_VALUE/privkey.pem"
+    fi
+    strip_outer_quotes "$VALUE"
+    return 0
+}
+
+get_xhttp_mode() {
+    if is_mws_enabled; then
+        echo "auto"
+    else
+        echo "packet-up"
+    fi
     return 0
 }
 
@@ -1590,6 +1664,15 @@ def xhttp_alpn_query():
     return "&alpn=http%2F1.1"
 
 
+def read_mws_enabled():
+    try:
+        with open("mws_enabled.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+        return value in ("1", "true", "yes", "on", "enabled")
+    except Exception:
+        return False
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -1601,9 +1684,12 @@ def normalize_xhttp_path_py(path):
 
 def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
     path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
-    extra = xhttp_extra_param(method)
     tag = urllib.parse.quote(tag, safe="")
-    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if read_mws_enabled():
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=auto"
+    else:
+        extra = xhttp_extra_param(method)
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
         url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
@@ -1879,6 +1965,10 @@ build_config() {
     REALITY_DEST_VALUE=""
     REALITY_PRIVATE_KEY_VALUE=""
     REALITY_SHORT_ID_VALUE=""
+    MWS_ENABLED_VALUE="0"
+    MWS_DOMAIN_VALUE=""
+    MWS_CERT_VALUE=""
+    MWS_KEY_VALUE=""
 
     prune_expired >/dev/null 2>&1
 
@@ -1903,7 +1993,14 @@ build_config() {
         REALITY_SHORT_ID_VALUE="$(read_reality_short_id)"
     fi
 
-    python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" <<'PY'
+    if is_mws_enabled; then
+        MWS_ENABLED_VALUE="1"
+        MWS_DOMAIN_VALUE="$(get_mws_domain)"
+        MWS_CERT_VALUE="$(get_mws_cert_file)"
+        MWS_KEY_VALUE="$(get_mws_key_file)"
+    fi
+
+    python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$MWS_ENABLED_VALUE" "$MWS_DOMAIN_VALUE" "$MWS_CERT_VALUE" "$MWS_KEY_VALUE" <<'PY'
 import json, sys
 
 users_file = sys.argv[1]
@@ -1930,6 +2027,10 @@ stats_port = int(sys.argv[10])
 transport = sys.argv[11] if len(sys.argv) > 11 else "ws"
 xhttp_path = sys.argv[12] if len(sys.argv) > 12 and sys.argv[12] else "/api/v1/sync/"
 xhttp_method = (sys.argv[13] if len(sys.argv) > 13 and sys.argv[13] else "GET").upper()
+mws_enabled = len(sys.argv) > 14 and sys.argv[14] == "1"
+mws_domain = sys.argv[15] if len(sys.argv) > 15 else ""
+mws_cert = sys.argv[16] if len(sys.argv) > 16 else ""
+mws_key = sys.argv[17] if len(sys.argv) > 17 else ""
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
 if not xhttp_path.endswith("/"):
@@ -1984,7 +2085,26 @@ main_inbound = {
     }
 }
 
-if transport == "xhttp":
+if transport == "xhttp" and mws_enabled:
+    main_inbound["tag"] = "XHTTP_mws"
+    main_inbound["streamSettings"] = {
+        "network": "xhttp",
+        "security": "tls",
+        "tlsSettings": {
+            "minVersion": "1.2",
+            "certificates": [
+                {
+                    "certificateFile": mws_cert,
+                    "keyFile": mws_key
+                }
+            ]
+        },
+        "xhttpSettings": {
+            "mode": "auto",
+            "path": xhttp_path
+        }
+    }
+elif transport == "xhttp":
     main_inbound["streamSettings"] = {
         "network": "xhttp",
         "security": "none",
@@ -2264,6 +2384,15 @@ def xhttp_alpn_query():
     return "&alpn=http%2F1.1"
 
 
+def read_mws_enabled():
+    try:
+        with open("mws_enabled.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+        return value in ("1", "true", "yes", "on", "enabled")
+    except Exception:
+        return False
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -2275,9 +2404,12 @@ def normalize_xhttp_path_py(path):
 
 def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
     path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
-    extra = xhttp_extra_param(method)
     tag = urllib.parse.quote(tag, safe="")
-    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if read_mws_enabled():
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=auto"
+    else:
+        extra = xhttp_extra_param(method)
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
         url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
@@ -2460,6 +2592,8 @@ cmd_help() {
     echo "vpn cdn off/status         manage generated CDN links"
     echo "vpn xhttp on/off/status    switch main inbound between XHTTP and WS"
     echo "vpn xhttp alpn http1|h2|none"
+    echo "vpn mws on DOMAIN [PATH]   enable direct MWS XHTTP+TLS inbound"
+    echo "vpn mws off/status         manage direct MWS mode"
     echo "vpn transport ws|xhttp     transport alias"
     echo "vpn join-token             show token for node auto-registration"
     echo "vpn join MASTER TOKEN NAME auto-register this node on master"
@@ -3504,6 +3638,11 @@ cmd_xhttp() {
             echo "xhttp path: $(get_xhttp_path)"
             echo "xhttp uplink method: $(get_xhttp_method)"
             echo "xhttp alpn: $(get_xhttp_alpn)"
+            if is_mws_enabled; then
+                echo "mws direct: enabled domain=$(get_mws_domain) mode=auto tls=yes"
+            else
+                echo "mws direct: disabled"
+            fi
             print_line
             ;;
         on|enable|enabled|xhttp)
@@ -3615,6 +3754,86 @@ cmd_xhttp() {
     esac
 
     return 0
+}
+
+cmd_mws() {
+    local ACTION="${1:-status}"
+    local DOMAIN_VALUE PATH_VALUE CERT_VALUE KEY_VALUE
+
+    case "$ACTION" in
+        status|"")
+            print_line
+            echo "MWS XHTTP"
+            print_line
+            if is_mws_enabled; then
+                echo "status: enabled"
+            else
+                echo "status: disabled"
+            fi
+            echo "domain: $(get_mws_domain)"
+            echo "xhttp path: $(get_xhttp_path)"
+            echo "cert: $(get_mws_cert_file)"
+            echo "key: $(get_mws_key_file)"
+            echo "origin for MWS: https://$(read_public_ip):$(get_public_port)"
+            echo "host header: $(get_mws_domain)"
+            print_line
+            ;;
+        on|enable|enabled)
+            DOMAIN_VALUE="$(normalize_domain "${2:-}")"
+            PATH_VALUE="$(strip_outer_quotes "${3:-/xhttppath}")"
+            CERT_VALUE="$(strip_outer_quotes "${4:-}")"
+            KEY_VALUE="$(strip_outer_quotes "${5:-}")"
+            if [ -z "$DOMAIN_VALUE" ]; then
+                echo "usage: vpn mws on DOMAIN [PATH] [CERT_FILE] [KEY_FILE]"
+                return 0
+            fi
+            case "$PATH_VALUE" in
+                /*) ;;
+                *) PATH_VALUE="/$PATH_VALUE" ;;
+            esac
+            echo "1" > "$MWS_ENABLED_FILE"
+            echo "$DOMAIN_VALUE" > "$MWS_DOMAIN_FILE"
+            echo "$PATH_VALUE" > "$XHTTP_PATH_FILE"
+            echo "GET" > "$XHTTP_METHOD_FILE"
+            echo "h2" > "$XHTTP_ALPN_FILE"
+            if [ -n "$CERT_VALUE" ]; then
+                echo "$CERT_VALUE" > "$MWS_CERT_FILE"
+            else
+                echo "/etc/letsencrypt/live/$DOMAIN_VALUE/fullchain.pem" > "$MWS_CERT_FILE"
+            fi
+            if [ -n "$KEY_VALUE" ]; then
+                echo "$KEY_VALUE" > "$MWS_KEY_FILE"
+            else
+                echo "/etc/letsencrypt/live/$DOMAIN_VALUE/privkey.pem" > "$MWS_KEY_FILE"
+            fi
+            set_transport xhttp
+            build_config >/dev/null 2>&1
+            restart_xray >/dev/null 2>&1
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "mws_enabled" "$DOMAIN_VALUE path=$PATH_VALUE"
+            echo "mws xhttp enabled"
+            echo "MWS origin: https://$(read_public_ip):$(get_public_port)"
+            echo "MWS Host header: $DOMAIN_VALUE"
+            echo "MWS WebSocket: off"
+            ;;
+        off|disable|disabled)
+            echo "0" > "$MWS_ENABLED_FILE"
+            build_config >/dev/null 2>&1
+            restart_xray >/dev/null 2>&1
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "mws_disabled" ""
+            echo "mws xhttp disabled"
+            ;;
+        *)
+            echo "usage: vpn mws on DOMAIN [PATH] [CERT_FILE] [KEY_FILE]"
+            echo "       vpn mws off"
+            echo "       vpn mws status"
+            ;;
+    esac
 }
 
 cmd_transport() {
@@ -4050,6 +4269,15 @@ def xhttp_alpn_query():
     return "&alpn=http%2F1.1"
 
 
+def read_mws_enabled():
+    try:
+        with open("mws_enabled.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+        return value in ("1", "true", "yes", "on", "enabled")
+    except Exception:
+        return False
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -4061,9 +4289,12 @@ def normalize_xhttp_path_py(path):
 
 def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
     path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
-    extra = xhttp_extra_param(method)
     tag = urllib.parse.quote(tag, safe="")
-    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if read_mws_enabled():
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=auto"
+    else:
+        extra = xhttp_extra_param(method)
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
         url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
@@ -4204,6 +4435,10 @@ def read_first_line(path):
             return f.readline().strip()
     except Exception:
         return ""
+
+
+def enabled_from_file(path):
+    return read_first_line(path).strip().lower() in ("1", "true", "yes", "on", "enabled")
 
 
 def read_node_name():
@@ -4857,7 +5092,31 @@ def write_config(users):
         "settings": {"clients": clients, "decryption": "none"},
         "sniffing": {"enabled": True, "destOverride": ["http", "tls", "quic"]},
     }
-    if TRANSPORT == "xhttp":
+    mws_enabled = enabled_from_file("mws_enabled.txt")
+    mws_domain = read_first_line("mws_domain.txt") or read_domain()
+    mws_cert = read_first_line("mws_cert_file.txt") or f"/etc/letsencrypt/live/{mws_domain}/fullchain.pem"
+    mws_key = read_first_line("mws_key_file.txt") or f"/etc/letsencrypt/live/{mws_domain}/privkey.pem"
+
+    if TRANSPORT == "xhttp" and mws_enabled:
+        main_inbound["tag"] = "XHTTP_mws"
+        main_inbound["streamSettings"] = {
+            "network": "xhttp",
+            "security": "tls",
+            "tlsSettings": {
+                "minVersion": "1.2",
+                "certificates": [
+                    {
+                        "certificateFile": mws_cert,
+                        "keyFile": mws_key,
+                    }
+                ],
+            },
+            "xhttpSettings": {
+                "mode": "auto",
+                "path": XHTTP_PATH,
+            },
+        }
+    elif TRANSPORT == "xhttp":
         main_inbound["streamSettings"] = {
             "network": "xhttp",
             "security": "none",
@@ -6357,6 +6616,15 @@ def xhttp_alpn_query():
     return "&alpn=http%2F1.1"
 
 
+def read_mws_enabled():
+    try:
+        with open("mws_enabled.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+        return value in ("1", "true", "yes", "on", "enabled")
+    except Exception:
+        return False
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -6368,9 +6636,12 @@ def normalize_xhttp_path_py(path):
 
 def build_xhttp_vless(client_id, address, port, path, host_header, tag, security="none", sni="", method="GET"):
     path = urllib.parse.quote(normalize_xhttp_path_py(path), safe="")
-    extra = xhttp_extra_param(method)
     tag = urllib.parse.quote(tag, safe="")
-    url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
+    if read_mws_enabled():
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=auto"
+    else:
+        extra = xhttp_extra_param(method)
+        url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
         url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
@@ -7950,7 +8221,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$MWS_ENABLED_FILE" "$MWS_DOMAIN_FILE" "$MWS_CERT_FILE" "$MWS_KEY_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -7995,6 +8266,7 @@ backup, data_dir = sys.argv[1], sys.argv[2]
 allowed = {
     "users.json", "devices.json", "traffic.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
     "api_token.txt", "sub_token.txt", "sub_name.txt", "transport.txt", "xhttp_path.txt", "xhttp_method.txt", "xhttp_alpn.txt",
+    "mws_enabled.txt", "mws_domain.txt", "mws_cert_file.txt", "mws_key_file.txt",
     "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
@@ -8797,6 +9069,10 @@ handle_cmd() {
         xhttp)
             shift
             cmd_xhttp "$@"
+            ;;
+        mws|mwscdn)
+            shift
+            cmd_mws "$@"
             ;;
         transport)
             shift
