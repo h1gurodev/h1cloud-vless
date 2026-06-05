@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.05-xhttp-tags"
+SCRIPT_VERSION="2026.06.05-xhttp-alpn"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -40,6 +40,7 @@ SUB_NAME_FILE="$DATA_DIR/sub_name.txt"
 TRANSPORT_FILE="$DATA_DIR/transport.txt"
 XHTTP_PATH_FILE="$DATA_DIR/xhttp_path.txt"
 XHTTP_METHOD_FILE="$DATA_DIR/xhttp_method.txt"
+XHTTP_ALPN_FILE="$DATA_DIR/xhttp_alpn.txt"
 CDN_WS_ENABLED_FILE="$DATA_DIR/cdn_ws_enabled.txt"
 CDN_WS_HOST_FILE="$DATA_DIR/cdn_ws_host.txt"
 CDN_WS_SNI_FILE="$DATA_DIR/cdn_ws_sni.txt"
@@ -126,6 +127,10 @@ init_files() {
 
     if [ ! -f "$XHTTP_METHOD_FILE" ]; then
         echo "GET" > "$XHTTP_METHOD_FILE"
+    fi
+
+    if [ ! -f "$XHTTP_ALPN_FILE" ]; then
+        echo "http1" > "$XHTTP_ALPN_FILE"
     fi
 
     touch "$KEY_FILE" "$ACTION_LOG_FILE" >/dev/null 2>&1
@@ -744,6 +749,52 @@ get_xhttp_method() {
             echo "GET"
             ;;
     esac
+    return 0
+}
+
+normalize_xhttp_alpn() {
+    local ALPN_VALUE
+
+    ALPN_VALUE="$(strip_outer_quotes "${1:-}")"
+    ALPN_VALUE="$(printf '%s' "$ALPN_VALUE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$ALPN_VALUE" in
+        h2|http2|2)
+            echo "h2"
+            ;;
+        none|off|disable|disabled|auto|default)
+            echo "none"
+            ;;
+        http1|http1.1|http/1.1|1|1.1|"")
+            echo "http1"
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+get_xhttp_alpn() {
+    local ALPN_VALUE
+
+    ALPN_VALUE="${XHTTP_ALPN:-${VPN_XHTTP_ALPN:-}}"
+    if [ -z "$ALPN_VALUE" ] && [ -f "$XHTTP_ALPN_FILE" ] && [ -s "$XHTTP_ALPN_FILE" ]; then
+        ALPN_VALUE="$(head -n 1 "$XHTTP_ALPN_FILE" 2>/dev/null)"
+    fi
+
+    normalize_xhttp_alpn "$ALPN_VALUE" || echo "http1"
+    return 0
+}
+
+set_xhttp_alpn() {
+    local ALPN_VALUE
+
+    ALPN_VALUE="$(normalize_xhttp_alpn "${1:-}")"
+    if [ -z "$ALPN_VALUE" ]; then
+        return 1
+    fi
+
+    echo "$ALPN_VALUE" > "$XHTTP_ALPN_FILE"
     return 0
 }
 
@@ -1505,6 +1556,40 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
+def read_xhttp_alpn(default="http1"):
+    try:
+        with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+    except Exception:
+        value = default
+    aliases = {
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "default": "none",
+        "http1": "http1",
+        "http1.1": "http1",
+        "http/1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "": default,
+    }
+    return aliases.get(value, default)
+
+
+def xhttp_alpn_query():
+    value = read_xhttp_alpn()
+    if value == "h2":
+        return "&alpn=h2"
+    if value == "none":
+        return ""
+    return "&alpn=http%2F1.1"
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -1520,7 +1605,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -2145,6 +2230,40 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
+def read_xhttp_alpn(default="http1"):
+    try:
+        with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+    except Exception:
+        value = default
+    aliases = {
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "default": "none",
+        "http1": "http1",
+        "http1.1": "http1",
+        "http/1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "": default,
+    }
+    return aliases.get(value, default)
+
+
+def xhttp_alpn_query():
+    value = read_xhttp_alpn()
+    if value == "h2":
+        return "&alpn=h2"
+    if value == "none":
+        return ""
+    return "&alpn=http%2F1.1"
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -2160,7 +2279,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -2340,6 +2459,7 @@ cmd_help() {
     echo "vpn cdn xhttp HOST SNI PORT TAG PATH"
     echo "vpn cdn off/status         manage generated CDN links"
     echo "vpn xhttp on/off/status    switch main inbound between XHTTP and WS"
+    echo "vpn xhttp alpn http1|h2|none"
     echo "vpn transport ws|xhttp     transport alias"
     echo "vpn join-token             show token for node auto-registration"
     echo "vpn join MASTER TOKEN NAME auto-register this node on master"
@@ -3372,7 +3492,7 @@ cmd_reality() {
 
 cmd_xhttp() {
     local ACTION="${1:-status}"
-    local PATH_VALUE METHOD_VALUE
+    local PATH_VALUE METHOD_VALUE ALPN_VALUE
 
     case "$ACTION" in
         status|"")
@@ -3383,6 +3503,7 @@ cmd_xhttp() {
             echo "ws path: /xray"
             echo "xhttp path: $(get_xhttp_path)"
             echo "xhttp uplink method: $(get_xhttp_method)"
+            echo "xhttp alpn: $(get_xhttp_alpn)"
             print_line
             ;;
         on|enable|enabled|xhttp)
@@ -3420,6 +3541,7 @@ cmd_xhttp() {
             echo "xhttp enabled"
             echo "local path: $(get_xhttp_path)"
             echo "uplink method: $(get_xhttp_method)"
+            echo "alpn: $(get_xhttp_alpn)"
             ;;
         off|disable|disabled|ws)
             set_transport ws
@@ -3472,9 +3594,22 @@ cmd_xhttp() {
                     ;;
             esac
             ;;
+        alpn)
+            ALPN_VALUE="$(strip_outer_quotes "${2:-}")"
+            if ! set_xhttp_alpn "$ALPN_VALUE"; then
+                echo "usage: vpn xhttp alpn http1|h2|none"
+                return 0
+            fi
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "xhttp_alpn_set" "$(get_xhttp_alpn)"
+            echo "xhttp alpn saved: $(get_xhttp_alpn)"
+            ;;
         *)
             echo "usage: vpn xhttp on [PATH/] [GET|POST|PUT]"
             echo "       vpn xhttp off"
+            echo "       vpn xhttp alpn http1|h2|none"
             echo "       vpn xhttp status"
             ;;
     esac
@@ -3881,6 +4016,40 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
+def read_xhttp_alpn(default="http1"):
+    try:
+        with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+    except Exception:
+        value = default
+    aliases = {
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "default": "none",
+        "http1": "http1",
+        "http1.1": "http1",
+        "http/1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "": default,
+    }
+    return aliases.get(value, default)
+
+
+def xhttp_alpn_query():
+    value = read_xhttp_alpn()
+    if value == "h2":
+        return "&alpn=h2"
+    if value == "none":
+        return ""
+    return "&alpn=http%2F1.1"
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -3896,7 +4065,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -6154,6 +6323,40 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
+def read_xhttp_alpn(default="http1"):
+    try:
+        with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
+            value = f.readline().strip().lower()
+    except Exception:
+        value = default
+    aliases = {
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "default": "none",
+        "http1": "http1",
+        "http1.1": "http1",
+        "http/1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "": default,
+    }
+    return aliases.get(value, default)
+
+
+def xhttp_alpn_query():
+    value = read_xhttp_alpn()
+    if value == "h2":
+        return "&alpn=h2"
+    if value == "none":
+        return ""
+    return "&alpn=http%2F1.1"
+
+
 def normalize_xhttp_path_py(path):
     path = str(path or "/api/v1/sync/").strip()
     if not path.startswith("/"):
@@ -6169,7 +6372,7 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     tag = urllib.parse.quote(tag, safe="")
     url = f"vless://{client_id}@{address}:{port}?encryption=none&type=xhttp&path={path}&host={host_header}&mode=packet-up&extra={extra}"
     if security == "tls":
-        url += f"&security=tls&sni={sni or host_header}&fp=chrome&alpn=http%2F1.1"
+        url += f"&security=tls&sni={sni or host_header}&fp=chrome{xhttp_alpn_query()}"
     else:
         url += "&security=none"
     return url + f"#{tag}"
@@ -7747,7 +7950,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -7791,7 +7994,7 @@ import zipfile
 backup, data_dir = sys.argv[1], sys.argv[2]
 allowed = {
     "users.json", "devices.json", "traffic.json", "domain.txt", "config.json", "key.txt", "node_name.txt", "logs.txt",
-    "api_token.txt", "sub_token.txt", "sub_name.txt", "transport.txt", "xhttp_path.txt", "xhttp_method.txt",
+    "api_token.txt", "sub_token.txt", "sub_name.txt", "transport.txt", "xhttp_path.txt", "xhttp_method.txt", "xhttp_alpn.txt",
     "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
