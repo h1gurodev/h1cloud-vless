@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.05-mws-xhttp"
+SCRIPT_VERSION="2026.06.11-ssss"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -24,6 +24,7 @@ ACTION_LOG_FILE="$DATA_DIR/logs.txt"
 API_TOKEN_FILE="$DATA_DIR/api_token.txt"
 API_PORT_FILE="$DATA_DIR/api_port.txt"
 API_PID_FILE="$DATA_DIR/api.pid"
+XRAY_RESTART_REQUEST_FILE="$DATA_DIR/xray_restart_request.txt"
 REALITY_ENABLED_FILE="$DATA_DIR/reality_enabled.txt"
 REALITY_PRIVATE_KEY_FILE="$DATA_DIR/reality_private_key.txt"
 PUBLIC_IP_FILE="$DATA_DIR/public_ip.txt"
@@ -65,6 +66,7 @@ NODES_FILE="$DATA_DIR/nodes.json"
 JOIN_TOKEN_FILE="$DATA_DIR/join_token.txt"
 UPSTREAM_API_URL_FILE="$DATA_DIR/upstream_api_url.txt"
 UPSTREAM_API_TOKEN_FILE="$DATA_DIR/upstream_api_token.txt"
+EGRESS_XRAY_LINK_FILE="$DATA_DIR/egress_xray_link.txt"
 BACKUP_DIR="$DATA_DIR/backups"
 UPDATE_URL_FILE="$DATA_DIR/update_url.txt"
 AUTO_UPDATE_FILE="$DATA_DIR/auto_update.txt"
@@ -1002,6 +1004,47 @@ get_cdn_xhttp_public_path() {
     printf '%s\n' "$PATH_VALUE"
     return 0
 }
+
+get_egress_xray_link() {
+    local VALUE
+
+    VALUE="${EGRESS_XRAY_LINK:-${VPN_EGRESS_XRAY_LINK:-}}"
+    if [ -z "$VALUE" ] && [ -f "$EGRESS_XRAY_LINK_FILE" ] && [ -s "$EGRESS_XRAY_LINK_FILE" ]; then
+        VALUE="$(head -n 1 "$EGRESS_XRAY_LINK_FILE" 2>/dev/null)"
+    fi
+
+    strip_outer_quotes "$VALUE"
+    return 0
+}
+
+is_egress_xray_enabled() {
+    local VALUE
+
+    VALUE="$(get_egress_xray_link)"
+    [ -n "$VALUE" ]
+}
+
+set_egress_xray_link() {
+    local VALUE
+
+    VALUE="$(strip_outer_quotes "$1")"
+    case "$VALUE" in
+        vless://*) ;;
+        *)
+            echo "bad egress link: only vless:// links are supported"
+            return 1
+            ;;
+    esac
+
+    printf '%s\n' "$VALUE" > "$EGRESS_XRAY_LINK_FILE"
+    return 0
+}
+
+clear_egress_xray_link() {
+    rm -f "$EGRESS_XRAY_LINK_FILE" >/dev/null 2>&1
+    return 0
+}
+
 make_uuid() {
     if [ -f /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
@@ -1542,6 +1585,7 @@ sync_keys_file() {
     CDN_XHTTP_PORT_VALUE=""
     CDN_XHTTP_TAG_VALUE=""
     CDN_XHTTP_PUBLIC_PATH_VALUE=""
+    EGRESS_XRAY_LINK_VALUE="$(get_egress_xray_link)"
 
     if is_reality_enabled && ensure_reality_files >/dev/null 2>&1; then
         REALITY_ENABLED_VALUE="1"
@@ -1574,7 +1618,7 @@ sync_keys_file() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
+    python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
 import datetime
 import json
 import sys
@@ -1618,7 +1662,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "1024-2048",
+        "uplinkChunkSize": "2048-3072",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -1737,6 +1781,7 @@ cdn_xhttp_sni = (sys.argv[28] if len(sys.argv) > 28 else "") or cdn_xhttp_host
 cdn_xhttp_port = (sys.argv[29] if len(sys.argv) > 29 else "") or "443"
 cdn_xhttp_tag_suffix = (sys.argv[30] if len(sys.argv) > 30 else "") or "CDN"
 cdn_xhttp_public_path = (sys.argv[31] if len(sys.argv) > 31 else "") or xhttp_path
+egress_xray_link = sys.argv[32] if len(sys.argv) > 32 else ""
 tag_ws = read_tag_suffix("tag_ws.txt", "WS")
 tag_xhttp = read_tag_suffix("tag_xhttp.txt", "XHTTP")
 tag_reality = read_tag_suffix("tag_reality.txt", "Reality")
@@ -1792,6 +1837,10 @@ if cdn_ws_enabled:
     lines.append(f"cdn_ws: {cdn_ws_host}:{cdn_ws_port} sni={cdn_ws_sni} path={cdn_ws_path}")
 if cdn_xhttp_enabled:
     lines.append(f"cdn_xhttp: {cdn_xhttp_host}:{cdn_xhttp_port} sni={cdn_xhttp_sni} path={cdn_xhttp_public_path}")
+if egress_xray_link:
+    lines.append("egress: xray relay")
+else:
+    lines.append("egress: direct")
 lines.append(" ")
 
 def ws_link(name, uuid):
@@ -1979,6 +2028,7 @@ build_config() {
     MWS_DOMAIN_VALUE=""
     MWS_CERT_VALUE=""
     MWS_KEY_VALUE=""
+    EGRESS_XRAY_LINK_VALUE="$(get_egress_xray_link)"
 
     prune_expired >/dev/null 2>&1
 
@@ -2010,8 +2060,8 @@ build_config() {
         MWS_KEY_VALUE="$(get_mws_key_file)"
     fi
 
-    python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$MWS_ENABLED_VALUE" "$MWS_DOMAIN_VALUE" "$MWS_CERT_VALUE" "$MWS_KEY_VALUE" <<'PY'
-import json, sys
+    python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$MWS_ENABLED_VALUE" "$MWS_DOMAIN_VALUE" "$MWS_CERT_VALUE" "$MWS_KEY_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
+import json, sys, urllib.parse
 
 users_file = sys.argv[1]
 config_file = sys.argv[2]
@@ -2041,6 +2091,7 @@ mws_enabled = len(sys.argv) > 14 and sys.argv[14] == "1"
 mws_domain = sys.argv[15] if len(sys.argv) > 15 else ""
 mws_cert = sys.argv[16] if len(sys.argv) > 16 else ""
 mws_key = sys.argv[17] if len(sys.argv) > 17 else ""
+egress_xray_link = sys.argv[18].strip() if len(sys.argv) > 18 else ""
 if not xhttp_path.startswith("/"):
     xhttp_path = "/" + xhttp_path
 if not xhttp_path.endswith("/"):
@@ -2079,6 +2130,105 @@ for u in users:
             "email": name + "-reality",
             "flow": "xtls-rprx-vision"
         })
+
+def _first(params, key, default=""):
+    values = params.get(key)
+    if not values:
+        return default
+    return urllib.parse.unquote(values[0])
+
+def _alpn_list(value):
+    value = urllib.parse.unquote(value or "").replace("http1", "http/1.1")
+    return [p for p in (part.strip() for part in value.split(",")) if p]
+
+def direct_outbound_from_link(link):
+    link = (link or "").strip()
+    if not link:
+        return {
+            "protocol": "freedom",
+            "tag": "direct",
+            "settings": {
+                "domainStrategy": "UseIPv4"
+            }
+        }
+
+    parsed = urllib.parse.urlparse(link)
+    if parsed.scheme != "vless" or not parsed.username or not parsed.hostname:
+        raise SystemExit("bad egress link: use vless://UUID@HOST:PORT?... link")
+
+    params = urllib.parse.parse_qs(parsed.query)
+    network = _first(params, "type", "tcp") or "tcp"
+    security = _first(params, "security", "none") or "none"
+    user = {
+        "id": urllib.parse.unquote(parsed.username),
+        "encryption": _first(params, "encryption", "none") or "none"
+    }
+    if _first(params, "flow"):
+        user["flow"] = _first(params, "flow")
+
+    outbound = {
+        "protocol": "vless",
+        "tag": "direct",
+        "settings": {
+            "vnext": [
+                {
+                    "address": parsed.hostname,
+                    "port": parsed.port or (443 if security in ("tls", "reality") else 80),
+                    "users": [user]
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": network,
+            "security": security
+        }
+    }
+    stream = outbound["streamSettings"]
+    sni = _first(params, "sni") or _first(params, "host") or parsed.hostname
+
+    if security == "tls":
+        stream["tlsSettings"] = {
+            "serverName": sni,
+            "fingerprint": _first(params, "fp", "chrome") or "chrome"
+        }
+        alpn = _alpn_list(_first(params, "alpn"))
+        if alpn:
+            stream["tlsSettings"]["alpn"] = alpn
+    elif security == "reality":
+        stream["realitySettings"] = {
+            "serverName": sni,
+            "fingerprint": _first(params, "fp", "chrome") or "chrome",
+            "publicKey": _first(params, "pbk"),
+            "shortId": _first(params, "sid"),
+            "spiderX": _first(params, "spx", "/") or "/"
+        }
+
+    path = _first(params, "path", "/")
+    host = _first(params, "host")
+    if network == "ws":
+        stream["wsSettings"] = {"path": path}
+        if host:
+            stream["wsSettings"]["headers"] = {"Host": host}
+    elif network == "xhttp":
+        xs = {
+            "path": path,
+            "mode": _first(params, "mode", "packet-up") or "packet-up"
+        }
+        if host:
+            xs["host"] = host
+        raw_extra = _first(params, "extra")
+        if raw_extra:
+            try:
+                extra = json.loads(raw_extra)
+                if isinstance(extra, dict):
+                    xs["extra"] = extra
+            except Exception:
+                pass
+        stream["xhttpSettings"] = xs
+    elif network == "grpc":
+        stream["grpcSettings"] = {"serviceName": _first(params, "serviceName")}
+
+    return outbound
 
 main_inbound = {
     "port": port,
@@ -2130,7 +2280,7 @@ elif transport == "xhttp":
                 "uplinkDataKey": "X-Payload",
                 "xPaddingBytes": "80-240",
                 "xPaddingMethod": "tokenish",
-                "uplinkChunkSize": "1024-2048",
+                "uplinkChunkSize": "2048-3072",
                 "sessionPlacement": "header",
                 "uplinkHTTPMethod": xhttp_method,
                 "xPaddingObfsMode": True,
@@ -2184,10 +2334,7 @@ config = {
         }
     ],
     "outbounds": [
-        {
-            "protocol": "freedom",
-            "tag": "direct"
-        },
+        direct_outbound_from_link(egress_xray_link),
         {
             "protocol": "freedom",
             "tag": "api"
@@ -2244,8 +2391,174 @@ PY
     return 0
 }
 
+apply_link_token() {
+    local TOKEN_VALUE
+
+    TOKEN_VALUE="$(strip_outer_quotes "${1:-}")"
+    case "$TOKEN_VALUE" in
+        h1link.*) ;;
+        *)
+            echo "bad link token"
+            return 1
+            ;;
+    esac
+
+    python3 - "$TOKEN_VALUE" \
+        "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" \
+        "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" \
+        "$EGRESS_XRAY_LINK_FILE" <<'PY'
+import base64
+import json
+import os
+import re
+import sys
+
+(
+    token,
+    transport_file,
+    xhttp_path_file,
+    xhttp_method_file,
+    xhttp_alpn_file,
+    cdn_enabled_file,
+    cdn_host_file,
+    cdn_sni_file,
+    cdn_port_file,
+    cdn_tag_file,
+    cdn_public_path_file,
+    egress_file,
+) = sys.argv[1:13]
+
+def fail(message):
+    print(message, file=sys.stderr)
+    raise SystemExit(1)
+
+def write(path, value):
+    tmp = f"{path}.tmp.{os.getpid()}"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(str(value).rstrip("\n") + "\n")
+    os.replace(tmp, path)
+
+def norm_path(value, default="/api/v1/sync/"):
+    value = str(value or default).strip()
+    if not value:
+        value = default
+    if not value.startswith("/"):
+        value = "/" + value
+    if not value.endswith("/"):
+        value += "/"
+    return value
+
+def norm_host(value, field):
+    value = str(value or "").strip()
+    value = re.sub(r"^https?://", "", value).split("/", 1)[0].strip("[]")
+    if not re.fullmatch(r"[A-Za-z0-9._:-]+", value):
+        fail(f"bad {field}")
+    return value
+
+def norm_method(value):
+    value = str(value or "GET").strip().upper()
+    return value if value in ("GET", "POST", "PUT") else "GET"
+
+def norm_alpn(value):
+    raw = str(value or "h2,http1").lower().replace(" ", "")
+    aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "http1": "http1",
+        "http/1.1": "http1",
+        "http1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "": "h2,http1",
+    }
+    return aliases.get(raw, "h2,http1")
+
+if not token.startswith("h1link."):
+    fail("bad link token prefix")
+
+raw = token.split(".", 1)[1]
+raw += "=" * (-len(raw) % 4)
+try:
+    payload = json.loads(base64.urlsafe_b64decode(raw.encode("ascii")).decode("utf-8"))
+except Exception as exc:
+    fail(f"cannot decode link token: {exc}")
+
+if not isinstance(payload, dict) or payload.get("type") != "h1link":
+    fail("bad link token payload")
+
+backend_path = norm_path(payload.get("backend_path") or payload.get("xhttp_path") or "/api/v1/sync/")
+cdn_host = norm_host(payload.get("cdn_host") or payload.get("host") or payload.get("address"), "cdn_host")
+sni = norm_host(payload.get("sni") or cdn_host, "sni")
+cdn_port = int(payload.get("cdn_port") or payload.get("port") or 443)
+if cdn_port < 1 or cdn_port > 65535:
+    fail("bad cdn port")
+public_path = norm_path(payload.get("public_path") or payload.get("path") or backend_path)
+tag = str(payload.get("tag") or "CDN").strip() or "CDN"
+method = norm_method(payload.get("method"))
+alpn = norm_alpn(payload.get("alpn"))
+egress_link = str(payload.get("egress_link") or "").strip()
+if egress_link and not egress_link.startswith("vless://"):
+    fail("bad egress link")
+
+write(transport_file, "xhttp")
+write(xhttp_path_file, backend_path)
+write(xhttp_method_file, method)
+write(xhttp_alpn_file, alpn)
+write(cdn_enabled_file, "1")
+write(cdn_host_file, cdn_host)
+write(cdn_sni_file, sni)
+write(cdn_port_file, str(cdn_port))
+write(cdn_tag_file, tag)
+write(cdn_public_path_file, public_path)
+
+if egress_link:
+    write(egress_file, egress_link)
+elif payload.get("egress_mode") == "direct" or payload.get("clear_egress"):
+    try:
+        os.remove(egress_file)
+    except FileNotFoundError:
+        pass
+
+print(f"cdn_host={cdn_host}")
+print(f"sni={sni}")
+print(f"public_path={public_path}")
+print(f"backend_path={backend_path}")
+print(f"egress={'xray' if egress_link else ('direct' if payload.get('egress_mode') == 'direct' or payload.get('clear_egress') else 'unchanged')}")
+PY
+    if [ "$?" -ne 0 ]; then
+        echo "link token apply failed"
+        return 1
+    fi
+
+    restart_xray >/dev/null 2>&1
+    sync_keys_file >/dev/null 2>&1
+    remember_users_state
+    restart_api_if_running
+    restart_sub_if_running
+    log_action "link_token_apply" "$(printf '%s' "$TOKEN_VALUE" | cut -c1-32)..."
+    echo "link token applied"
+    echo "use: vpn status"
+    echo "use: vpn link USER"
+    return 0
+}
+
 make_link() {
     NAME="$1"
+
+    case "$NAME" in
+        h1link.*)
+            apply_link_token "$NAME"
+            return $?
+            ;;
+    esac
 
     if ! validate_name "$NAME"; then
         echo "bad user name. use only: a-z A-Z 0-9 . _ -"
@@ -2345,7 +2658,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "1024-2048",
+        "uplinkChunkSize": "2048-3072",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -2596,6 +2909,7 @@ cmd_help() {
     echo "vpn list                   show users"
     echo "vpn info NAME              show user info"
     echo "vpn link NAME              show user link"
+    echo "vpn link h1link.TOKEN      apply CDN/XHTTP/egress setup bundle after vpn update"
     echo "vpn limit NAME ...         set traffic GB and device limits"
     echo "vpn keys                   show all keys and recent logs"
     echo "vpn logs [COUNT]           show action logs"
@@ -2611,6 +2925,8 @@ cmd_help() {
     echo "vpn xhttp alpn h2,http1|h2|http1|none"
     echo "vpn mws on DOMAIN [PATH]   enable direct MWS XHTTP+TLS inbound"
     echo "vpn mws off/status         manage direct MWS mode"
+    echo "vpn egress link VLESS      send outgoing traffic through upstream Xray"
+    echo "vpn egress off/status      manage Xray relay egress"
     echo "vpn transport ws|xhttp     transport alias"
     echo "vpn join-token             show token for node auto-registration"
     echo "vpn join MASTER TOKEN NAME auto-register this node on master"
@@ -2640,7 +2956,8 @@ cmd_help() {
     echo "examples:"
     echo "vpn add test 30"
     echo "vpn add test 30 100 3"
-    echo "vpn link test"
+    echo "vpn update"
+    echo "vpn link h1link.PASTE_TOKEN"
     echo "vpn limit test 100 3"
     echo "vpn limit test traffic 50"
     echo "vpn limit test devices 2"
@@ -2650,6 +2967,7 @@ cmd_help() {
     echo "vpn cdn cdn.gateway.h1cloud.su top2355543541.mwscdn.ru 443 CDN /h1cdn/nl1/xray"
     echo "vpn xhttp on"
     echo "vpn cdn xhttp proxy.h1cloud.su proxy.h1cloud.su 443 CDN /api/v1/ch1/sync"
+    echo "vpn egress link 'vless://UUID@BACKEND:443?type=xhttp&security=tls&...'"
     echo "vpn sub name Germany-VPN"
     echo "vpn join-token"
     echo "vpn join http://MASTER:PORT/api JOIN_TOKEN Germany"
@@ -3641,6 +3959,62 @@ cmd_reality() {
     return 0
 }
 
+cmd_egress() {
+    local ACTION LINK_VALUE
+
+    ACTION="${1:-status}"
+    case "$ACTION" in
+        status)
+            LINK_VALUE="$(get_egress_xray_link)"
+            if [ -n "$LINK_VALUE" ]; then
+                echo "egress: xray relay"
+                python3 - "$LINK_VALUE" <<'PY'
+import sys, urllib.parse
+link = sys.argv[1]
+parsed = urllib.parse.urlparse(link)
+params = urllib.parse.parse_qs(parsed.query)
+q = lambda k, d="": urllib.parse.unquote((params.get(k) or [d])[0])
+print(f"upstream: {parsed.hostname}:{parsed.port or 443}")
+print(f"type: {q('type', 'tcp')}")
+print(f"security: {q('security', 'none')}")
+print(f"sni: {q('sni') or q('host') or parsed.hostname}")
+print(f"path: {q('path')}")
+PY
+            else
+                echo "egress: direct"
+            fi
+            ;;
+        link|set|on)
+            shift
+            LINK_VALUE="$*"
+            if [ -z "$LINK_VALUE" ]; then
+                echo "usage: vpn egress link 'vless://UUID@HOST:PORT?...'"
+                return 0
+            fi
+            if ! set_egress_xray_link "$LINK_VALUE"; then
+                return 0
+            fi
+            restart_xray >/dev/null 2>&1
+            sync_keys_file >/dev/null 2>&1
+            log_action "egress_xray_set" "$(get_egress_xray_link | sed -E 's#(vless://)[^@]+@#\1***@#')"
+            echo "egress xray relay enabled"
+            echo "local clients/CDN stay on this server; outgoing traffic goes through upstream Xray"
+            ;;
+        off|disable|disabled|direct)
+            clear_egress_xray_link
+            restart_xray >/dev/null 2>&1
+            sync_keys_file >/dev/null 2>&1
+            log_action "egress_xray_off" ""
+            echo "egress direct enabled"
+            ;;
+        *)
+            echo "usage: vpn egress status"
+            echo "       vpn egress link 'vless://UUID@HOST:PORT?...'"
+            echo "       vpn egress off"
+            ;;
+    esac
+}
+
 cmd_xhttp() {
     local ACTION="${1:-status}"
     local PATH_VALUE METHOD_VALUE ALPN_VALUE
@@ -4186,7 +4560,7 @@ start_api_process() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" <<'PY' &
+    python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$EGRESS_XRAY_LINK_FILE" "$XRAY_RESTART_REQUEST_FILE" <<'PY' &
 import datetime
 import hashlib
 import json
@@ -4237,7 +4611,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "1024-2048",
+        "uplinkChunkSize": "2048-3072",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -4405,12 +4779,15 @@ CDN_XHTTP_PUBLIC_PATH = (sys.argv[69] if len(sys.argv) > 69 and sys.argv[69] els
 TRANSPORT_FILE = sys.argv[70] if len(sys.argv) > 70 else ""
 XHTTP_PATH_FILE = sys.argv[71] if len(sys.argv) > 71 else ""
 XHTTP_METHOD_FILE = sys.argv[72] if len(sys.argv) > 72 else ""
-CDN_XHTTP_ENABLED_FILE = sys.argv[73] if len(sys.argv) > 73 else ""
-CDN_XHTTP_HOST_FILE = sys.argv[74] if len(sys.argv) > 74 else ""
-CDN_XHTTP_SNI_FILE = sys.argv[75] if len(sys.argv) > 75 else ""
-CDN_XHTTP_PORT_FILE = sys.argv[76] if len(sys.argv) > 76 else ""
-CDN_XHTTP_TAG_FILE = sys.argv[77] if len(sys.argv) > 77 else ""
-CDN_XHTTP_PUBLIC_PATH_FILE = sys.argv[78] if len(sys.argv) > 78 else ""
+XHTTP_ALPN_FILE = sys.argv[73] if len(sys.argv) > 73 else "xhttp_alpn.txt"
+CDN_XHTTP_ENABLED_FILE = sys.argv[74] if len(sys.argv) > 74 else ""
+CDN_XHTTP_HOST_FILE = sys.argv[75] if len(sys.argv) > 75 else ""
+CDN_XHTTP_SNI_FILE = sys.argv[76] if len(sys.argv) > 76 else ""
+CDN_XHTTP_PORT_FILE = sys.argv[77] if len(sys.argv) > 77 else ""
+CDN_XHTTP_TAG_FILE = sys.argv[78] if len(sys.argv) > 78 else ""
+CDN_XHTTP_PUBLIC_PATH_FILE = sys.argv[79] if len(sys.argv) > 79 else ""
+EGRESS_XRAY_LINK_FILE = sys.argv[80] if len(sys.argv) > 80 else "egress_xray_link.txt"
+XRAY_RESTART_REQUEST_FILE = sys.argv[81] if len(sys.argv) > 81 else "xray_restart_request.txt"
 if TRANSPORT != "xhttp":
     TRANSPORT = "ws"
 if not XHTTP_PATH.startswith("/"):
@@ -4659,7 +5036,7 @@ def backup_targets():
     names = [
         USERS_FILE, DEVICES_FILE, TRAFFIC_FILE, DOMAIN_FILE, CONFIG_FILE, KEY_FILE, NODE_NAME_FILE, ACTION_LOG_FILE,
         API_TOKEN_FILE, SUB_TOKEN_FILE, PEERS_FILE, NODES_FILE, JOIN_TOKEN_FILE,
-        UPSTREAM_API_URL_FILE, UPSTREAM_API_TOKEN_FILE, UPDATE_URL_FILE, AUTO_UPDATE_FILE,
+        UPSTREAM_API_URL_FILE, UPSTREAM_API_TOKEN_FILE, EGRESS_XRAY_LINK_FILE, UPDATE_URL_FILE, AUTO_UPDATE_FILE,
         SUB_NAME_FILE, TRANSPORT_FILE, XHTTP_PATH_FILE, XHTTP_METHOD_FILE,
         CDN_WS_ENABLED_FILE, CDN_WS_HOST_FILE, CDN_WS_SNI_FILE,
         CDN_WS_PORT_FILE, CDN_WS_TAG_FILE, CDN_WS_PATH_FILE,
@@ -4871,6 +5248,107 @@ def save_users(users):
     write_keys(users)
     write_config(users)
 
+def _first_query(params, key, default=""):
+    values = params.get(key)
+    if not values:
+        return default
+    return urllib.parse.unquote(values[0])
+
+
+def _alpn_list(value):
+    value = urllib.parse.unquote(value or "").replace("http1", "http/1.1")
+    return [p for p in (part.strip() for part in value.split(",")) if p]
+
+
+def direct_outbound_from_link(link):
+    link = str(link or "").strip()
+    if not link:
+        return {
+            "protocol": "freedom",
+            "tag": "direct",
+            "settings": {
+                "domainStrategy": "UseIPv4"
+            },
+        }
+
+    parsed = urllib.parse.urlparse(link)
+    if parsed.scheme != "vless" or not parsed.username or not parsed.hostname:
+        raise ValueError("bad egress link")
+
+    params = urllib.parse.parse_qs(parsed.query)
+    network = _first_query(params, "type", "tcp") or "tcp"
+    security = _first_query(params, "security", "none") or "none"
+    user = {
+        "id": urllib.parse.unquote(parsed.username),
+        "encryption": _first_query(params, "encryption", "none") or "none",
+    }
+    if _first_query(params, "flow"):
+        user["flow"] = _first_query(params, "flow")
+
+    outbound = {
+        "protocol": "vless",
+        "tag": "direct",
+        "settings": {
+            "vnext": [
+                {
+                    "address": parsed.hostname,
+                    "port": parsed.port or (443 if security in ("tls", "reality") else 80),
+                    "users": [user],
+                }
+            ]
+        },
+        "streamSettings": {
+            "network": network,
+            "security": security,
+        },
+    }
+    stream = outbound["streamSettings"]
+    sni = _first_query(params, "sni") or _first_query(params, "host") or parsed.hostname
+
+    if security == "tls":
+        stream["tlsSettings"] = {
+            "serverName": sni,
+            "fingerprint": _first_query(params, "fp", "chrome") or "chrome",
+        }
+        alpn = _alpn_list(_first_query(params, "alpn"))
+        if alpn:
+            stream["tlsSettings"]["alpn"] = alpn
+    elif security == "reality":
+        stream["realitySettings"] = {
+            "serverName": sni,
+            "fingerprint": _first_query(params, "fp", "chrome") or "chrome",
+            "publicKey": _first_query(params, "pbk"),
+            "shortId": _first_query(params, "sid"),
+            "spiderX": _first_query(params, "spx", "/") or "/",
+        }
+
+    path = _first_query(params, "path", "/")
+    host = _first_query(params, "host")
+    if network == "ws":
+        stream["wsSettings"] = {"path": path}
+        if host:
+            stream["wsSettings"]["headers"] = {"Host": host}
+    elif network == "xhttp":
+        xs = {
+            "path": path,
+            "mode": _first_query(params, "mode", "packet-up") or "packet-up",
+        }
+        if host:
+            xs["host"] = host
+        raw_extra = _first_query(params, "extra")
+        if raw_extra:
+            try:
+                extra = json.loads(raw_extra)
+                if isinstance(extra, dict):
+                    xs["extra"] = extra
+            except Exception:
+                pass
+        stream["xhttpSettings"] = xs
+    elif network == "grpc":
+        stream["grpcSettings"] = {"serviceName": _first_query(params, "serviceName")}
+
+    return outbound
+
 
 def make_ws_link(user):
     name = str(user.get("name", ""))
@@ -5053,6 +5531,10 @@ def status_payload(users):
             "public_path": CDN_XHTTP_PUBLIC_PATH,
             "origin_path": XHTTP_PATH,
         },
+        "egress": {
+            "mode": "xray" if read_first_line(EGRESS_XRAY_LINK_FILE) else "direct",
+            "xray_link_configured": bool(read_first_line(EGRESS_XRAY_LINK_FILE)),
+        },
         "reality": {
             "enabled": REALITY_ENABLED,
             "local_port": REALITY_PORT if REALITY_ENABLED else None,
@@ -5120,6 +5602,7 @@ def write_config(users):
     mws_domain = read_first_line("mws_domain.txt") or read_domain()
     mws_cert = read_first_line("mws_cert_file.txt") or f"/etc/letsencrypt/live/{mws_domain}/fullchain.pem"
     mws_key = read_first_line("mws_key_file.txt") or f"/etc/letsencrypt/live/{mws_domain}/privkey.pem"
+    egress_xray_link = read_first_line(EGRESS_XRAY_LINK_FILE)
 
     if TRANSPORT == "xhttp" and mws_enabled:
         main_inbound["tag"] = "XHTTP_mws"
@@ -5156,7 +5639,7 @@ def write_config(users):
                     "uplinkDataKey": "X-Payload",
                     "xPaddingBytes": "80-240",
                     "xPaddingMethod": "tokenish",
-                    "uplinkChunkSize": "1024-2048",
+                    "uplinkChunkSize": "2048-3072",
                     "sessionPlacement": "header",
                     "uplinkHTTPMethod": XHTTP_METHOD,
                     "xPaddingObfsMode": True,
@@ -5190,7 +5673,7 @@ def write_config(users):
             }
         ],
         "outbounds": [
-            {"protocol": "freedom", "tag": "direct"},
+            direct_outbound_from_link(egress_xray_link),
             {"protocol": "freedom", "tag": "api"},
         ],
         "routing": {
@@ -5249,6 +5732,10 @@ def write_keys(users):
         lines.append(f"cdn_ws: {CDN_WS_HOST}:{CDN_WS_PORT} sni={CDN_WS_SNI} path={CDN_WS_PATH}")
     if CDN_XHTTP_ENABLED and CDN_XHTTP_HOST:
         lines.append(f"cdn_xhttp: {CDN_XHTTP_HOST}:{CDN_XHTTP_PORT} sni={CDN_XHTTP_SNI} path={CDN_XHTTP_PUBLIC_PATH}")
+    if read_first_line(EGRESS_XRAY_LINK_FILE):
+        lines.append("egress: xray relay")
+    else:
+        lines.append("egress: direct")
     lines.append(" ")
 
     active_count = 0
@@ -5343,6 +5830,50 @@ def first_value(mapping, *names):
                 return value[0] if value else ""
             return value
     return ""
+
+def normalize_host(value):
+    raw = strip_outer_quotes(str(value or "").strip())
+    raw = re.sub(r"^https?://", "", raw).split("/", 1)[0].strip()
+    raw = raw.split("@")[-1]
+    raw = raw.rsplit(":", 1)[0] if raw.count(":") <= 1 else raw.strip("[]")
+    return raw
+
+
+def normalize_path_value(value, default="/api/v1/sync/"):
+    path = strip_outer_quotes(str(value or default).strip()) or default
+    if not path.startswith("/"):
+        path = "/" + path
+    if not path.endswith("/"):
+        path += "/"
+    return path
+
+
+def normalize_xhttp_method(value):
+    method = strip_outer_quotes(str(value or "GET")).upper()
+    return method if method in ("GET", "POST", "PUT") else "GET"
+
+
+def normalize_xhttp_alpn_value(value):
+    raw = strip_outer_quotes(str(value or "h2,http1")).lower().replace(" ", "")
+    aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2": "h2",
+        "http2": "h2",
+        "2": "h2",
+        "http1": "http1",
+        "http/1.1": "http1",
+        "http1.1": "http1",
+        "1": "http1",
+        "1.1": "http1",
+        "none": "none",
+        "off": "none",
+        "disabled": "none",
+        "auto": "none",
+        "": "h2,http1",
+    }
+    return aliases.get(raw, "h2,http1")
 
 
 def embedded_panel_html():
@@ -5809,6 +6340,10 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
 
+        if method in ("POST", "PUT", "PATCH") and parts and parts[0] in ("server", "config") and len(parts) >= 2 and parts[1] in ("cdn-xhttp", "xhttp-cdn", "relay"):
+            self.configure_cdn_xhttp(users, data)
+            return
+
         if parts and parts[0] == "federation":
             if method == "GET":
                 self.send_json(200, {"ok": True, "federation": federation_payload()})
@@ -5992,6 +6527,82 @@ class Handler(BaseHTTPRequestHandler):
         save_peers(new_peers)
         log_action("api_peer_delete", name)
         self.send_json(200, {"ok": True, "peers": new_peers})
+
+    def configure_cdn_xhttp(self, users, data):
+        global TRANSPORT, XHTTP_PATH, XHTTP_METHOD
+        global CDN_XHTTP_ENABLED, CDN_XHTTP_HOST, CDN_XHTTP_SNI, CDN_XHTTP_PORT, CDN_XHTTP_TAG, CDN_XHTTP_PUBLIC_PATH
+
+        cdn_host = normalize_host(first_value(data, "cdn_host", "host", "address"))
+        sni = normalize_host(first_value(data, "sni", "server_name")) or cdn_host
+        port = parse_int(first_value(data, "cdn_port", "port"), 443) or 443
+        tag = strip_outer_quotes(str(first_value(data, "tag", "tag_suffix") or "CDN")).strip() or "CDN"
+        public_path = normalize_path_value(first_value(data, "public_path", "path", "cdn_path"), "/api/v1/sync/")
+        backend_path = normalize_path_value(first_value(data, "backend_path", "origin_path", "xhttp_path"), "/api/v1/sync/")
+        method = normalize_xhttp_method(first_value(data, "method", "xhttp_method"))
+        alpn = normalize_xhttp_alpn_value(first_value(data, "alpn", "xhttp_alpn"))
+        egress_link = strip_outer_quotes(str(first_value(data, "egress_link", "outbound_link", "upstream_link") or "").strip())
+
+        if not cdn_host or not re.fullmatch(r"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+", cdn_host):
+            self.send_json(400, {"ok": False, "error": "bad_cdn_host"})
+            return
+        if not sni or not re.fullmatch(r"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+", sni):
+            self.send_json(400, {"ok": False, "error": "bad_sni"})
+            return
+        if port < 1 or port > 65535:
+            self.send_json(400, {"ok": False, "error": "bad_port"})
+            return
+        if egress_link and not egress_link.startswith("vless://"):
+            self.send_json(400, {"ok": False, "error": "bad_egress_link"})
+            return
+
+        atomic_text(TRANSPORT_FILE, "xhttp\n")
+        atomic_text(XHTTP_PATH_FILE, backend_path + "\n")
+        atomic_text(XHTTP_METHOD_FILE, method + "\n")
+        atomic_text(XHTTP_ALPN_FILE, alpn + "\n")
+        atomic_text(CDN_XHTTP_ENABLED_FILE, "1\n")
+        atomic_text(CDN_XHTTP_HOST_FILE, cdn_host + "\n")
+        atomic_text(CDN_XHTTP_SNI_FILE, sni + "\n")
+        atomic_text(CDN_XHTTP_PORT_FILE, str(port) + "\n")
+        atomic_text(CDN_XHTTP_TAG_FILE, tag + "\n")
+        atomic_text(CDN_XHTTP_PUBLIC_PATH_FILE, public_path + "\n")
+        TRANSPORT = "xhttp"
+        XHTTP_PATH = backend_path
+        XHTTP_METHOD = method
+        CDN_XHTTP_ENABLED = True
+        CDN_XHTTP_HOST = cdn_host
+        CDN_XHTTP_SNI = sni
+        CDN_XHTTP_PORT = str(port)
+        CDN_XHTTP_TAG = tag
+        CDN_XHTTP_PUBLIC_PATH = public_path
+        if egress_link:
+            atomic_text(EGRESS_XRAY_LINK_FILE, egress_link + "\n")
+        clear_egress = str(first_value(data, "clear_egress", "egress_off")).lower() in ("1", "true", "yes", "on")
+        if not egress_link and clear_egress:
+            try:
+                os.remove(EGRESS_XRAY_LINK_FILE)
+            except FileNotFoundError:
+                pass
+
+        save_users(users)
+        atomic_text(XRAY_RESTART_REQUEST_FILE, f"api_cdn_xhttp {now_ts()}\n")
+        log_action("api_cdn_xhttp", f"cdn={cdn_host} sni={sni} path={public_path} backend_path={backend_path} egress={'on' if egress_link else ('off' if clear_egress else 'unchanged')}")
+        self.send_json(200, {
+            "ok": True,
+            "transport": "xhttp",
+            "backend_path": backend_path,
+            "cdn_xhttp": {
+                "host": cdn_host,
+                "sni": sni,
+                "port": port,
+                "tag": tag,
+                "public_path": public_path,
+            },
+            "egress": {
+                "mode": "xray" if egress_link or read_first_line(EGRESS_XRAY_LINK_FILE) else "direct",
+                "configured": bool(egress_link or read_first_line(EGRESS_XRAY_LINK_FILE)),
+            },
+            "restart": "requested",
+        })
 
     def set_federation(self, data):
         api_url = strip_outer_quotes(first_value(data, "api_url", "url", "upstream_url")).rstrip("/")
@@ -6591,7 +7202,7 @@ def xhttp_client_extra(method):
         "uplinkDataKey": "X-Payload",
         "xPaddingBytes": "80-240",
         "xPaddingMethod": "tokenish",
-        "uplinkChunkSize": "1024-2048",
+        "uplinkChunkSize": "2048-3072",
         "sessionPlacement": "header",
         "uplinkHTTPMethod": method,
         "xPaddingObfsMode": True,
@@ -8252,7 +8863,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$MWS_ENABLED_FILE" "$MWS_DOMAIN_FILE" "$MWS_CERT_FILE" "$MWS_KEY_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$MWS_ENABLED_FILE" "$MWS_DOMAIN_FILE" "$MWS_CERT_FILE" "$MWS_KEY_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$EGRESS_XRAY_LINK_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -8299,7 +8910,7 @@ allowed = {
     "api_token.txt", "sub_token.txt", "sub_name.txt", "transport.txt", "xhttp_path.txt", "xhttp_method.txt", "xhttp_alpn.txt",
     "mws_enabled.txt", "mws_domain.txt", "mws_cert_file.txt", "mws_key_file.txt",
     "peers.txt", "nodes.json", "join_token.txt",
-    "upstream_api_url.txt", "upstream_api_token.txt", "update_url.txt", "auto_update.txt",
+    "upstream_api_url.txt", "upstream_api_token.txt", "egress_xray_link.txt", "update_url.txt", "auto_update.txt",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
     "cdn_xhttp_enabled.txt", "cdn_xhttp_host.txt", "cdn_xhttp_sni.txt", "cdn_xhttp_port.txt", "cdn_xhttp_tag.txt", "cdn_xhttp_public_path.txt",
     "tag_ws.txt", "tag_xhttp.txt", "tag_reality.txt",
@@ -8944,6 +9555,11 @@ cmd_status() {
     else
         echo "cdn_ws: off"
     fi
+    if is_egress_xray_enabled; then
+        echo "egress: xray relay"
+    else
+        echo "egress: direct"
+    fi
     if is_reality_enabled; then
         echo "reality: local=$(get_reality_port) public=$(get_public_reality_port) sni=$(get_reality_sni)"
     else
@@ -9105,6 +9721,10 @@ handle_cmd() {
             shift
             cmd_mws "$@"
             ;;
+        egress|relay|outbound)
+            shift
+            cmd_egress "$@"
+            ;;
         transport)
             shift
             cmd_transport "$@"
@@ -9204,6 +9824,19 @@ keep_xray_alive() {
         restart_xray >/dev/null 2>&1
     fi
 
+    return 0
+}
+
+handle_xray_restart_request() {
+    if [ ! -f "$XRAY_RESTART_REQUEST_FILE" ]; then
+        return 0
+    fi
+
+    REQUEST_REASON="$(head -n 1 "$XRAY_RESTART_REQUEST_FILE" 2>/dev/null)"
+    rm -f "$XRAY_RESTART_REQUEST_FILE" >/dev/null 2>&1
+    echo "xray restart requested: ${REQUEST_REASON:-api}"
+    restart_xray >/dev/null 2>&1
+    sync_keys_file >/dev/null 2>&1
     return 0
 }
 
@@ -9317,6 +9950,7 @@ start_server() {
         fi
 
         auto_update_tick
+        handle_xray_restart_request
         keep_xray_alive
         keep_api_alive
         keep_sub_alive
