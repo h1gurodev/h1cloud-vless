@@ -134,7 +134,7 @@ init_files() {
     fi
 
     if [ ! -f "$XHTTP_ALPN_FILE" ]; then
-        echo "http1" > "$XHTTP_ALPN_FILE"
+        echo "h2,http1" > "$XHTTP_ALPN_FILE"
     fi
 
     touch "$KEY_FILE" "$ACTION_LOG_FILE" >/dev/null 2>&1
@@ -255,13 +255,13 @@ read_domain() {
     return 0
 }
 
-# Возвращает реальный IP сервера (а не домен Pterodactyl Domains).
-# На Pterodactyl env SERVER_IP обычно содержит IP аллокации — но это часто
-# 0.0.0.0 (внутри контейнера), поэтому пробуем по очереди:
-#   1. env PUBLIC_IP / SERVER_IP (если он валидный, не 0.0.0.0/127.x)
-#   2. кэш в public_ip.txt
-#   3. curl на ifconfig.me / api.ipify.org (один раз, потом сохранить в кэш)
-#   4. fallback — домен из domain.txt
+# Р’РѕР·РІСЂР°С‰Р°РµС‚ СЂРµР°Р»СЊРЅС‹Р№ IP СЃРµСЂРІРµСЂР° (Р° РЅРµ РґРѕРјРµРЅ Pterodactyl Domains).
+# РќР° Pterodactyl env SERVER_IP РѕР±С‹С‡РЅРѕ СЃРѕРґРµСЂР¶РёС‚ IP Р°Р»Р»РѕРєР°С†РёРё вЂ” РЅРѕ СЌС‚Рѕ С‡Р°СЃС‚Рѕ
+# 0.0.0.0 (РІРЅСѓС‚СЂРё РєРѕРЅС‚РµР№РЅРµСЂР°), РїРѕСЌС‚РѕРјСѓ РїСЂРѕР±СѓРµРј РїРѕ РѕС‡РµСЂРµРґРё:
+#   1. env PUBLIC_IP / SERVER_IP (РµСЃР»Рё РѕРЅ РІР°Р»РёРґРЅС‹Р№, РЅРµ 0.0.0.0/127.x)
+#   2. РєСЌС€ РІ public_ip.txt
+#   3. curl РЅР° ifconfig.me / api.ipify.org (РѕРґРёРЅ СЂР°Р·, РїРѕС‚РѕРј СЃРѕС…СЂР°РЅРёС‚СЊ РІ РєСЌС€)
+#   4. fallback вЂ” РґРѕРјРµРЅ РёР· domain.txt
 read_public_ip() {
     local CANDIDATE=""
 
@@ -762,6 +762,9 @@ normalize_xhttp_alpn() {
     ALPN_VALUE="$(strip_outer_quotes "${1:-}")"
     ALPN_VALUE="$(printf '%s' "$ALPN_VALUE" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
     case "$ALPN_VALUE" in
+        h2,http1|h2,http/1.1|h2,http1.1|h2,http2|h2,http/2|h2,http/1|h2,1|h2,1.1)
+            echo "h2,http1"
+            ;;
         h2|http2|2)
             echo "h2"
             ;;
@@ -769,7 +772,7 @@ normalize_xhttp_alpn() {
             echo "none"
             ;;
         http1|http1.1|http/1.1|1|1.1|"")
-            echo "http1"
+            echo "h2,http1"
             ;;
         *)
             return 1
@@ -786,7 +789,7 @@ get_xhttp_alpn() {
         ALPN_VALUE="$(head -n 1 "$XHTTP_ALPN_FILE" 2>/dev/null)"
     fi
 
-    normalize_xhttp_alpn "$ALPN_VALUE" || echo "http1"
+    normalize_xhttp_alpn "$ALPN_VALUE" || echo "h2,http1"
     return 0
 }
 
@@ -1280,9 +1283,9 @@ get_api_token() {
     fi
 
     TOKEN="$(make_uuid)$(make_uuid)"
-    # ВАЖНО: `-` должен быть в КОНЦЕ списка, иначе GNU tr примет его за флаг
-    # и упадёт с "tr: invalid option -- '['" — токен станет пустым,
-    # и в файле окажется обычный unix timestamp вместо нормального ключа.
+    # Р’РђР–РќРћ: `-` РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РІ РљРћРќР¦Р• СЃРїРёСЃРєР°, РёРЅР°С‡Рµ GNU tr РїСЂРёРјРµС‚ РµРіРѕ Р·Р° С„Р»Р°Рі
+    # Рё СѓРїР°РґС‘С‚ СЃ "tr: invalid option -- '['" вЂ” С‚РѕРєРµРЅ СЃС‚Р°РЅРµС‚ РїСѓСЃС‚С‹Рј,
+    # Рё РІ С„Р°Р№Р»Рµ РѕРєР°Р¶РµС‚СЃСЏ РѕР±С‹С‡РЅС‹Р№ unix timestamp РІРјРµСЃС‚Рѕ РЅРѕСЂРјР°Р»СЊРЅРѕРіРѕ РєР»СЋС‡Р°.
     TOKEN="$(printf '%s' "$TOKEN" | tr -d '[:space:]-')"
 
     if [ -z "$TOKEN" ]; then
@@ -1410,17 +1413,17 @@ ensure_reality_files() {
     fi
 
     KEYS_OUTPUT="$("$XRAY_BIN" x25519 2>/dev/null)"
-    # Старый формат: "Private key:" / "Public key:"
-    # Новый формат (xray v25.3.6+): "PrivateKey:" / "Password:" (Password = публичный ключ)
-    # см. XTLS/Xray-core#5159, #5160
-    # Поддерживаем форматы:
-    #   "Private key: ..." / "Public key: ..."           (старый)
+    # РЎС‚Р°СЂС‹Р№ С„РѕСЂРјР°С‚: "Private key:" / "Public key:"
+    # РќРѕРІС‹Р№ С„РѕСЂРјР°С‚ (xray v25.3.6+): "PrivateKey:" / "Password:" (Password = РїСѓР±Р»РёС‡РЅС‹Р№ РєР»СЋС‡)
+    # СЃРј. XTLS/Xray-core#5159, #5160
+    # РџРѕРґРґРµСЂР¶РёРІР°РµРј С„РѕСЂРјР°С‚С‹:
+    #   "Private key: ..." / "Public key: ..."           (СЃС‚Р°СЂС‹Р№)
     #   "PrivateKey: ..."  / "Password: ..."              (v25.3.6+)
-    #   "PrivateKey: ..."  / "Password (PublicKey): ..."  (после PR XTLS/Xray-core#5759)
+    #   "PrivateKey: ..."  / "Password (PublicKey): ..."  (РїРѕСЃР»Рµ PR XTLS/Xray-core#5759)
     PRIVATE_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Private[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
     PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Public[[:space:]]*[Kk]ey[[:space:]]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
     if [ -z "$PUBLIC_KEY" ]; then
-        # ловим "Password:" и "Password (PublicKey):" и т.п.
+        # Р»РѕРІРёРј "Password:" Рё "Password (PublicKey):" Рё С‚.Рї.
         PUBLIC_KEY="$(echo "$KEYS_OUTPUT" | sed -n -E 's/^[[:space:]]*Password[^:]*:[[:space:]]*//p' | head -n 1 | tr -d '[:space:]')"
     fi
 
@@ -1630,13 +1633,18 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
-def read_xhttp_alpn(default="http1"):
+def read_xhttp_alpn(default="h2,http1"):
     try:
         with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
             value = f.readline().strip().lower()
     except Exception:
         value = default
     aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2,http2": "h2,http1",
+        "h2,1.1": "h2,http1",
         "h2": "h2",
         "http2": "h2",
         "2": "h2",
@@ -1657,6 +1665,8 @@ def read_xhttp_alpn(default="http1"):
 
 def xhttp_alpn_query():
     value = read_xhttp_alpn()
+    if value == "h2,http1":
+        return "&alpn=h2%2Chttp%2F1.1"
     if value == "h2":
         return "&alpn=h2"
     if value == "none":
@@ -2350,13 +2360,18 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
-def read_xhttp_alpn(default="http1"):
+def read_xhttp_alpn(default="h2,http1"):
     try:
         with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
             value = f.readline().strip().lower()
     except Exception:
         value = default
     aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2,http2": "h2,http1",
+        "h2,1.1": "h2,http1",
         "h2": "h2",
         "http2": "h2",
         "2": "h2",
@@ -2377,6 +2392,8 @@ def read_xhttp_alpn(default="http1"):
 
 def xhttp_alpn_query():
     value = read_xhttp_alpn()
+    if value == "h2,http1":
+        return "&alpn=h2%2Chttp%2F1.1"
     if value == "h2":
         return "&alpn=h2"
     if value == "none":
@@ -2591,7 +2608,7 @@ cmd_help() {
     echo "vpn cdn xhttp HOST SNI PORT TAG PATH"
     echo "vpn cdn off/status         manage generated CDN links"
     echo "vpn xhttp on/off/status    switch main inbound between XHTTP and WS"
-    echo "vpn xhttp alpn http1|h2|none"
+    echo "vpn xhttp alpn h2,http1|h2|http1|none"
     echo "vpn mws on DOMAIN [PATH]   enable direct MWS XHTTP+TLS inbound"
     echo "vpn mws off/status         manage direct MWS mode"
     echo "vpn transport ws|xhttp     transport alias"
@@ -3736,7 +3753,7 @@ cmd_xhttp() {
         alpn)
             ALPN_VALUE="$(strip_outer_quotes "${2:-}")"
             if ! set_xhttp_alpn "$ALPN_VALUE"; then
-                echo "usage: vpn xhttp alpn http1|h2|none"
+                echo "usage: vpn xhttp alpn h2,http1|h2|http1|none"
                 return 0
             fi
             sync_keys_file >/dev/null 2>&1
@@ -3748,7 +3765,7 @@ cmd_xhttp() {
         *)
             echo "usage: vpn xhttp on [PATH/] [GET|POST|PUT]"
             echo "       vpn xhttp off"
-            echo "       vpn xhttp alpn http1|h2|none"
+            echo "       vpn xhttp alpn h2,http1|h2|http1|none"
             echo "       vpn xhttp status"
             ;;
     esac
@@ -4069,9 +4086,9 @@ stop_api_process() {
 }
 
 start_api_process() {
-    # ВСЕ переменные функции — local, иначе они конфликтуют с такими же
-    # именами в start_sub_process/restart_api_if_running/keep_api_alive
-    # (бывало, что api при старте печатал чужой порт).
+    # Р’РЎР• РїРµСЂРµРјРµРЅРЅС‹Рµ С„СѓРЅРєС†РёРё вЂ” local, РёРЅР°С‡Рµ РѕРЅРё РєРѕРЅС„Р»РёРєС‚СѓСЋС‚ СЃ С‚Р°РєРёРјРё Р¶Рµ
+    # РёРјРµРЅР°РјРё РІ start_sub_process/restart_api_if_running/keep_api_alive
+    # (Р±С‹РІР°Р»Рѕ, С‡С‚Рѕ api РїСЂРё СЃС‚Р°СЂС‚Рµ РїРµС‡Р°С‚Р°Р» С‡СѓР¶РѕР№ РїРѕСЂС‚).
     local API_BIND_PORT="$1"
     local TOKEN LOCAL_PORT PUBLIC_PORT_VALUE NODE_NAME_VALUE
     local REALITY_ENABLED_VALUE REALITY_LOCAL_PORT_VALUE REALITY_PUBLIC_PORT_VALUE REALITY_PUBLIC_HOST_VALUE
@@ -4235,13 +4252,18 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
-def read_xhttp_alpn(default="http1"):
+def read_xhttp_alpn(default="h2,http1"):
     try:
         with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
             value = f.readline().strip().lower()
     except Exception:
         value = default
     aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2,http2": "h2,http1",
+        "h2,1.1": "h2,http1",
         "h2": "h2",
         "http2": "h2",
         "2": "h2",
@@ -4262,6 +4284,8 @@ def read_xhttp_alpn(default="http1"):
 
 def xhttp_alpn_query():
     value = read_xhttp_alpn()
+    if value == "h2,http1":
+        return "&alpn=h2%2Chttp%2F1.1"
     if value == "h2":
         return "&alpn=h2"
     if value == "none":
@@ -4465,11 +4489,11 @@ def strip_outer_quotes(value):
 def slugify_label(value):
     text = strip_outer_quotes(value).lower()
     table = {
-        "а": "a", "б": "b", "в": "v", "г": "g", "д": "d", "е": "e", "ё": "e",
-        "ж": "zh", "з": "z", "и": "i", "й": "y", "к": "k", "л": "l", "м": "m",
-        "н": "n", "о": "o", "п": "p", "р": "r", "с": "s", "т": "t", "у": "u",
-        "ф": "f", "х": "h", "ц": "c", "ч": "ch", "ш": "sh", "щ": "sch",
-        "ъ": "", "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
+        "Р°": "a", "Р±": "b", "РІ": "v", "Рі": "g", "Рґ": "d", "Рµ": "e", "С‘": "e",
+        "Р¶": "zh", "Р·": "z", "Рё": "i", "Р№": "y", "Рє": "k", "Р»": "l", "Рј": "m",
+        "РЅ": "n", "Рѕ": "o", "Рї": "p", "СЂ": "r", "СЃ": "s", "С‚": "t", "Сѓ": "u",
+        "С„": "f", "С…": "h", "С†": "c", "С‡": "ch", "С€": "sh", "С‰": "sch",
+        "СЉ": "", "С‹": "y", "СЊ": "", "СЌ": "e", "СЋ": "yu", "СЏ": "ya",
     }
     result = []
     for ch in text:
@@ -5473,7 +5497,7 @@ function renderClients(clients) {
     const limitText = [
       trafficLimit ? `${trafficUsed.toFixed(2).replace(/\\.?0+$/, "")}/${trafficLimit.toFixed(2).replace(/\\.?0+$/, "")} GB` : "",
       deviceLimit ? `${deviceCount}/${deviceLimit} devices` : "",
-    ].filter(Boolean).join(" · ");
+    ].filter(Boolean).join(" В· ");
     return `<tr>
       <td><strong>${name}</strong><br><code>${esc(client.uuid)}</code></td>
       <td><span class="pill ${banned ? "bad" : "ok"}">${banned ? "banned" : `${client.left_days || 0} days`}</span><br><small>${esc(limitText || client.ban_reason || "")}</small></td>
@@ -6291,9 +6315,9 @@ except OSError as exc:
     if exc.errno == 98:
         sys.stderr.write(
             f"port {API_PORT} is already in use.\n"
-            "on Pterodactyl: используй порт, который реально выделен этому серверу\n"
-            "(Configuration -> Allocations в панели). docker-proxy от wings уже сидит\n"
-            "на не-выделенных портах внутри netns, поэтому bind() падает.\n"
+            "on Pterodactyl: РёСЃРїРѕР»СЊР·СѓР№ РїРѕСЂС‚, РєРѕС‚РѕСЂС‹Р№ СЂРµР°Р»СЊРЅРѕ РІС‹РґРµР»РµРЅ СЌС‚РѕРјСѓ СЃРµСЂРІРµСЂСѓ\n"
+            "(Configuration -> Allocations РІ РїР°РЅРµР»Рё). docker-proxy РѕС‚ wings СѓР¶Рµ СЃРёРґРёС‚\n"
+            "РЅР° РЅРµ-РІС‹РґРµР»РµРЅРЅС‹С… РїРѕСЂС‚Р°С… РІРЅСѓС‚СЂРё netns, РїРѕСЌС‚РѕРјСѓ bind() РїР°РґР°РµС‚.\n"
         )
     else:
         sys.stderr.write(f"api bind failed on port {API_PORT}: {exc}\n")
@@ -6582,13 +6606,18 @@ def xhttp_extra_param(method):
     return urllib.parse.quote(extra, safe="")
 
 
-def read_xhttp_alpn(default="http1"):
+def read_xhttp_alpn(default="h2,http1"):
     try:
         with open("xhttp_alpn.txt", "r", encoding="utf-8") as f:
             value = f.readline().strip().lower()
     except Exception:
         value = default
     aliases = {
+        "h2,http1": "h2,http1",
+        "h2,http/1.1": "h2,http1",
+        "h2,http1.1": "h2,http1",
+        "h2,http2": "h2,http1",
+        "h2,1.1": "h2,http1",
         "h2": "h2",
         "http2": "h2",
         "2": "h2",
@@ -6609,6 +6638,8 @@ def read_xhttp_alpn(default="http1"):
 
 def xhttp_alpn_query():
     value = read_xhttp_alpn()
+    if value == "h2,http1":
+        return "&alpn=h2%2Chttp%2F1.1"
     if value == "h2":
         return "&alpn=h2"
     if value == "none":
@@ -7222,7 +7253,7 @@ def render_client_page(user, links, request_host=""):
 <main>
   <section>
     <h1>{html.escape(str(user.get("name", "")))}</h1>
-    <p>Подписка H1Cloud. Ссылка без token: <code>{html.escape(sub_url)}</code></p>
+    <p>РџРѕРґРїРёСЃРєР° H1Cloud. РЎСЃС‹Р»РєР° Р±РµР· token: <code>{html.escape(sub_url)}</code></p>
     <div class="actions">
       <button data-copy="{html.escape(sub_url, quote=True)}">Copy subscription</button>
       <a href="{html.escape(raw_url, quote=True)}">Raw</a>
@@ -7395,7 +7426,7 @@ except OSError as exc:
     if exc.errno == 98:
         sys.stderr.write(
             f"port {SUB_PORT} is already in use.\n"
-            "on Pterodactyl используй только порт, который выделен серверу в панели.\n"
+            "on Pterodactyl РёСЃРїРѕР»СЊР·СѓР№ С‚РѕР»СЊРєРѕ РїРѕСЂС‚, РєРѕС‚РѕСЂС‹Р№ РІС‹РґРµР»РµРЅ СЃРµСЂРІРµСЂСѓ РІ РїР°РЅРµР»Рё.\n"
         )
     else:
         sys.stderr.write(f"sub bind failed on port {SUB_PORT}: {exc}\n")
@@ -9232,9 +9263,9 @@ start_server() {
     echo "type: vpn help"
     print_line
     blank
-    echo "https://h1cloud.su - лучший хостинг"
+    echo "https://h1cloud.su - Р»СѓС‡С€РёР№ С…РѕСЃС‚РёРЅРі"
     echo "https://t.me/h1cloudbot"
-    echo "Программист - https://h1guro.ovh"
+    echo "РџСЂРѕРіСЂР°РјРјРёСЃС‚ - https://h1guro.ovh"
     print_line
 
     start_xray_process
