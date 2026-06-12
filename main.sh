@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.11-vpnlink-sync"
+SCRIPT_VERSION="2026.06.13-update"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 blank() {
@@ -38,6 +38,9 @@ SUB_TOKEN_FILE="$DATA_DIR/sub_token.txt"
 SUB_PORT_FILE="$DATA_DIR/sub_port.txt"
 SUB_PID_FILE="$DATA_DIR/sub.pid"
 SUB_NAME_FILE="$DATA_DIR/sub_name.txt"
+TLS_ENABLED_FILE="$DATA_DIR/tls_enabled.txt"
+TLS_CERT_FILE="$DATA_DIR/tls_cert.pem"
+TLS_KEY_FILE="$DATA_DIR/tls_key.pem"
 TRANSPORT_FILE="$DATA_DIR/transport.txt"
 XHTTP_PATH_FILE="$DATA_DIR/xhttp_path.txt"
 XHTTP_METHOD_FILE="$DATA_DIR/xhttp_method.txt"
@@ -1174,6 +1177,81 @@ set_reality_enabled() {
     return 0
 }
 
+# TLS для API и subscription-серверов. Включён по умолчанию:
+# выключить можно через vpn ssl off.
+is_tls_enabled() {
+    local VALUE
+    if [ ! -f "$TLS_ENABLED_FILE" ]; then
+        return 0
+    fi
+    VALUE="$(head -n 1 "$TLS_ENABLED_FILE" 2>/dev/null)"
+    if is_disabled_value "$VALUE"; then
+        return 1
+    fi
+    return 0
+}
+
+# Готовит self-signed сертификат (10 лет, SAN: домен + публичный IP),
+# если пользователь не установил свой через vpn ssl cert.
+ensure_tls_files() {
+    local DOMAIN_VALUE IP_VALUE SAN
+
+    if ! is_tls_enabled; then
+        return 1
+    fi
+
+    if [ -s "$TLS_CERT_FILE" ] && [ -s "$TLS_KEY_FILE" ]; then
+        return 0
+    fi
+
+    if ! command -v openssl >/dev/null 2>&1; then
+        echo "openssl not found: cannot generate TLS certificate, api/sub stay on http"
+        return 1
+    fi
+
+    DOMAIN_VALUE="$(read_domain)"
+    IP_VALUE="$(read_public_ip)"
+    SAN="DNS:$DOMAIN_VALUE,DNS:localhost,IP:127.0.0.1"
+    case "$IP_VALUE" in
+        [0-9]*.[0-9]*.[0-9]*.[0-9]*)
+            if [ "$IP_VALUE" != "$DOMAIN_VALUE" ]; then
+                SAN="$SAN,IP:$IP_VALUE"
+            fi
+            ;;
+        ""|"$DOMAIN_VALUE") ;;
+        *)
+            SAN="$SAN,DNS:$IP_VALUE"
+            ;;
+    esac
+
+    if ! openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+        -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" \
+        -subj "/CN=$DOMAIN_VALUE" \
+        -addext "subjectAltName=$SAN" >/dev/null 2>&1; then
+        # старые openssl без -addext
+        if ! openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
+            -keyout "$TLS_KEY_FILE" -out "$TLS_CERT_FILE" \
+            -subj "/CN=$DOMAIN_VALUE" >/dev/null 2>&1; then
+            rm -f "$TLS_CERT_FILE" "$TLS_KEY_FILE" >/dev/null 2>&1
+            echo "TLS certificate generation failed, api/sub stay on http"
+            return 1
+        fi
+    fi
+
+    chmod 600 "$TLS_KEY_FILE" >/dev/null 2>&1
+    log_action "tls" "self-signed certificate generated for $DOMAIN_VALUE"
+    return 0
+}
+
+# Схема для всех генерируемых ссылок (подписка, API, peers).
+http_scheme() {
+    if is_tls_enabled && [ -s "$TLS_CERT_FILE" ] && [ -s "$TLS_KEY_FILE" ]; then
+        echo "https"
+    else
+        echo "http"
+    fi
+}
+
 saved_api_port() {
     if [ -f "$API_PORT_FILE" ] && [ -s "$API_PORT_FILE" ]; then
         head -n 1 "$API_PORT_FILE"
@@ -1306,8 +1384,20 @@ check_port_conflict() {
     return 0
 }
 
+# Снимок users.json без форка cat: $(<file) — это builtin-чтение,
+# функция вызывается из горячего цикла дважды в секунду.
+read_users_snapshot() {
+    if [ -f "$USERS_FILE" ] && [ -r "$USERS_FILE" ]; then
+        USERS_SNAPSHOT="$(<"$USERS_FILE")"
+    else
+        USERS_SNAPSHOT="[]"
+    fi
+    return 0
+}
+
 remember_users_state() {
-    USERS_STATE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    USERS_STATE="$USERS_SNAPSHOT"
     return 0
 }
 
@@ -1553,7 +1643,7 @@ PY
         return 1
     fi
 
-    append_sub_name_fragment "http://$SUB_PUBLIC_HOST:$SUB_PORT_VALUE/sub/$SUB_ID" "$(get_sub_name)"
+    append_sub_name_fragment "$(http_scheme)://$SUB_PUBLIC_HOST:$SUB_PORT_VALUE/sub/$SUB_ID" "$(get_sub_name)"
     return 0
 }
 
@@ -1618,9 +1708,11 @@ sync_keys_file() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
+    H1_URL_SCHEME="$(http_scheme)" \
     python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
 import datetime
 import json
+import os
 import sys
 import time
 import urllib.parse
@@ -1884,7 +1976,8 @@ def subscription_url(name, uuid):
         return ""
     quoted_uuid = urllib.parse.quote(uuid, safe="")
     host = sub_public_host or domain
-    url = f"http://{host}:{sub_port}/sub/{quoted_uuid}"
+    scheme = os.environ.get("H1_URL_SCHEME", "http")
+    url = f"{scheme}://{host}:{sub_port}/sub/{quoted_uuid}"
     if sub_name:
         url += "#" + urllib.parse.quote(sub_name, safe="")
     return url
@@ -2943,6 +3036,9 @@ cmd_help() {
     echo "vpn reality status         show Reality status"
     echo "vpn reality PORT [PUBLIC]  enable Reality on allocated port"
     echo "vpn reality off            disable Reality"
+    echo "vpn ssl on/off/status      serve API and subscription over https"
+    echo "vpn ssl cert CERT KEY      install custom TLS certificate (PEM)"
+    echo "vpn ssl renew              regenerate self-signed certificate"
     echo "vpn api PORT               start API on 0.0.0.0:PORT"
     echo "vpn api stop               stop API"
     echo "vpn api status             show API status"
@@ -3959,6 +4055,93 @@ cmd_reality() {
     return 0
 }
 
+cmd_ssl() {
+    local ACTION="${1:-status}" CERT_ARG="${2:-}" KEY_ARG="${3:-}"
+
+    case "$ACTION" in
+        on|enable|enabled|1)
+            echo "1" > "$TLS_ENABLED_FILE"
+            if ensure_tls_files; then
+                echo "ssl: on"
+                echo "cert: $TLS_CERT_FILE"
+            else
+                echo "ssl: on, but certificate is not ready"
+            fi
+            log_action "ssl" "enabled"
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            echo "api/sub now serve https (self-signed unless custom cert installed)"
+            ;;
+        off|disable|disabled|0)
+            echo "0" > "$TLS_ENABLED_FILE"
+            log_action "ssl" "disabled"
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            echo "ssl: off (api/sub serve plain http)"
+            ;;
+        cert)
+            if [ ! -f "$CERT_ARG" ] || [ ! -f "$KEY_ARG" ]; then
+                echo "usage: vpn ssl cert CERT_PEM KEY_PEM"
+                echo "both files must exist (fullchain + private key)"
+                return 0
+            fi
+            if command -v openssl >/dev/null 2>&1; then
+                if ! openssl x509 -in "$CERT_ARG" -noout >/dev/null 2>&1; then
+                    echo "bad certificate: $CERT_ARG is not a valid PEM certificate"
+                    return 0
+                fi
+                if ! openssl pkey -in "$KEY_ARG" -noout >/dev/null 2>&1; then
+                    echo "bad key: $KEY_ARG is not a valid PEM private key"
+                    return 0
+                fi
+            fi
+            cp "$CERT_ARG" "$TLS_CERT_FILE" || { echo "cannot copy certificate"; return 0; }
+            cp "$KEY_ARG" "$TLS_KEY_FILE" || { echo "cannot copy key"; return 0; }
+            chmod 600 "$TLS_KEY_FILE" >/dev/null 2>&1
+            echo "1" > "$TLS_ENABLED_FILE"
+            log_action "ssl" "custom certificate installed"
+            sync_keys_file >/dev/null 2>&1
+            restart_api_if_running
+            restart_sub_if_running
+            echo "ssl: custom certificate installed and enabled"
+            ;;
+        renew|regen|regenerate)
+            rm -f "$TLS_CERT_FILE" "$TLS_KEY_FILE" >/dev/null 2>&1
+            echo "1" > "$TLS_ENABLED_FILE"
+            if ensure_tls_files; then
+                log_action "ssl" "self-signed certificate regenerated"
+                sync_keys_file >/dev/null 2>&1
+                restart_api_if_running
+                restart_sub_if_running
+                echo "ssl: self-signed certificate regenerated"
+            else
+                echo "ssl: certificate generation failed"
+            fi
+            ;;
+        status|*)
+            if is_tls_enabled; then
+                echo "ssl: on"
+            else
+                echo "ssl: off (vpn ssl on to enable)"
+            fi
+            if [ -s "$TLS_CERT_FILE" ]; then
+                echo "cert: $TLS_CERT_FILE"
+                if command -v openssl >/dev/null 2>&1; then
+                    openssl x509 -in "$TLS_CERT_FILE" -noout -subject -enddate 2>/dev/null | sed 's/^/  /'
+                fi
+            else
+                echo "cert: not generated yet (created on next api/sub start)"
+            fi
+            echo "scheme: $(http_scheme)://"
+            echo "custom cert: vpn ssl cert CERT_PEM KEY_PEM"
+            ;;
+    esac
+
+    return 0
+}
+
 cmd_egress() {
     local ACTION LINK_VALUE
 
@@ -4473,6 +4656,7 @@ start_api_process() {
     local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE CDN_WS_PATH_VALUE
     local TRANSPORT_VALUE XHTTP_PATH_VALUE XHTTP_METHOD_VALUE
     local CDN_XHTTP_ENABLED_VALUE CDN_XHTTP_HOST_VALUE CDN_XHTTP_SNI_VALUE CDN_XHTTP_PORT_VALUE CDN_XHTTP_TAG_VALUE CDN_XHTTP_PUBLIC_PATH_VALUE
+    local TLS_CERT_VALUE TLS_KEY_VALUE
 
     if ! validate_port "$API_BIND_PORT"; then
         echo "usage: vpn api PORT"
@@ -4560,12 +4744,21 @@ start_api_process() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
+    TLS_CERT_VALUE=""
+    TLS_KEY_VALUE=""
+    if ensure_tls_files; then
+        TLS_CERT_VALUE="$TLS_CERT_FILE"
+        TLS_KEY_VALUE="$TLS_KEY_FILE"
+    fi
+
+    H1_TLS_CERT="$TLS_CERT_VALUE" H1_TLS_KEY="$TLS_KEY_VALUE" \
     python3 -u - "$USERS_FILE" "$KEY_FILE" "$CONFIG_FILE" "$DOMAIN_FILE" "$API_TOKEN_FILE" "$ACTION_LOG_FILE" "$API_BIND_PORT" "$LOCAL_PORT" "$PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$NODE_NAME_FILE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$BACKUP_DIR" "$API_PUBLIC_HOST_VALUE" "$XRAY_STATS_PORT" "$XRAY_BIN" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$SUB_TOKEN_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$PUBLIC_IP_FILE" "$SUB_NAME_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$EGRESS_XRAY_LINK_FILE" "$XRAY_RESTART_REQUEST_FILE" <<'PY' &
 import datetime
 import hashlib
 import json
 import os
 import re
+import ssl
 import sys
 import time
 import urllib.error
@@ -4573,6 +4766,14 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
+
+TLS_CERT = os.environ.get("H1_TLS_CERT", "")
+TLS_KEY = os.environ.get("H1_TLS_KEY", "")
+TLS_ON = bool(TLS_CERT and TLS_KEY and os.path.isfile(TLS_CERT) and os.path.isfile(TLS_KEY))
+URL_SCHEME = "https" if TLS_ON else "http"
+# Ноды федерации используют self-signed сертификаты, поэтому исходящие
+# запросы к peers/upstream идут без проверки цепочки (auth — по токену).
+SSL_NOVERIFY = ssl._create_unverified_context()
 
 def read_tag_suffix(name, default):
     try:
@@ -4993,7 +5194,7 @@ def read_join_token():
 
 def public_api_url():
     host = API_PUBLIC_HOST or read_domain()
-    return f"http://{host}:{API_PORT}/api"
+    return f"{URL_SCHEME}://{host}:{API_PORT}/api"
 
 
 def node_health_from_url(url):
@@ -5005,7 +5206,7 @@ def node_health_from_url(url):
         health_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/health", "", "", ""))
         started = time.time()
         req = urllib.request.Request(health_url, headers={"User-Agent": "H1CloudVPNHealth/1.0"})
-        with urllib.request.urlopen(req, timeout=3) as resp:
+        with urllib.request.urlopen(req, timeout=3, context=SSL_NOVERIFY) as resp:
             body = resp.read(8192).decode("utf-8", "ignore")
         latency_ms = int((time.time() - started) * 1000)
         payload = {}
@@ -5118,7 +5319,7 @@ def upstream_request(method, path, payload=None):
 
     req = urllib.request.Request(api_url + path, data=body, method=method, headers=headers)
     try:
-        with urllib.request.urlopen(req, timeout=12) as resp:
+        with urllib.request.urlopen(req, timeout=12, context=SSL_NOVERIFY) as resp:
             text = resp.read(1024 * 1024).decode("utf-8", "ignore")
     except urllib.error.HTTPError as exc:
         text = exc.read().decode("utf-8", "ignore")
@@ -5432,7 +5633,7 @@ def make_subscription_url(user):
     if not client_id:
         return ""
     host = SUB_PUBLIC_HOST or read_domain()
-    url = f"http://{host}:{SUB_PORT}/sub/{client_id}"
+    url = f"{URL_SCHEME}://{host}:{SUB_PORT}/sub/{client_id}"
     if SUB_NAME:
         url += "#" + urllib.parse.quote(SUB_NAME, safe="")
     return url
@@ -6919,9 +7120,13 @@ class ReuseServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 
-log_action("api_start", f"0.0.0.0:{API_PORT}")
+log_action("api_start", f"0.0.0.0:{API_PORT} tls={'on' if TLS_ON else 'off'}")
 try:
     server = ReuseServer(("0.0.0.0", API_PORT), Handler)
+    if TLS_ON:
+        _tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        _tls_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        server.socket = _tls_ctx.wrap_socket(server.socket, server_side=True)
 except OSError as exc:
     if exc.errno == 98:
         sys.stderr.write(
@@ -6943,8 +7148,8 @@ PY
     sleep 1
 
     if kill -0 "$API_PID" >/dev/null 2>&1; then
-        echo "api started: 0.0.0.0:$API_BIND_PORT"
-        echo "url: http://$(read_public_ip):$API_BIND_PORT"
+        echo "api started: 0.0.0.0:$API_BIND_PORT ($(http_scheme))"
+        echo "url: $(http_scheme)://$(read_public_ip):$API_BIND_PORT"
         echo "token: $TOKEN"
         echo "auth: Authorization: Bearer $TOKEN"
         log_action "api_start" "0.0.0.0:$API_BIND_PORT pid=$API_PID"
@@ -6985,7 +7190,7 @@ cmd_api() {
         status)
             if api_is_running; then
                 RUNNING_PORT="$(cat "$API_PORT_FILE" 2>/dev/null)"
-                echo "api running: 0.0.0.0:${RUNNING_PORT:-unknown}"
+                echo "api running: 0.0.0.0:${RUNNING_PORT:-unknown} ($(http_scheme))"
                 echo "pid: $API_PID"
             else
                 echo "api stopped"
@@ -7091,6 +7296,7 @@ start_sub_process() {
     local SUB_NAME_VALUE CDN_WS_ENABLED_VALUE CDN_WS_HOST_VALUE CDN_WS_SNI_VALUE CDN_WS_PORT_VALUE CDN_WS_TAG_VALUE CDN_WS_PATH_VALUE
     local TRANSPORT_VALUE XHTTP_PATH_VALUE
     local CDN_XHTTP_ENABLED_VALUE CDN_XHTTP_HOST_VALUE CDN_XHTTP_SNI_VALUE CDN_XHTTP_PORT_VALUE CDN_XHTTP_TAG_VALUE CDN_XHTTP_PUBLIC_PATH_VALUE
+    local TLS_CERT_VALUE TLS_KEY_VALUE
 
     if ! validate_port "$SUB_BIND_PORT"; then
         echo "usage: vpn sub PORT"
@@ -7105,7 +7311,7 @@ start_sub_process() {
     if sub_is_running; then
         RUNNING_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
         echo "subscription already running: 0.0.0.0:${RUNNING_PORT:-unknown}"
-        echo "url format: http://$(read_subscription_host):${RUNNING_PORT:-PORT}/sub/CLIENT_UUID"
+        echo "url format: $(http_scheme)://$(read_subscription_host):${RUNNING_PORT:-PORT}/sub/CLIENT_UUID"
         return 0
     fi
 
@@ -7152,6 +7358,14 @@ start_sub_process() {
     fi
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
+    TLS_CERT_VALUE=""
+    TLS_KEY_VALUE=""
+    if ensure_tls_files; then
+        TLS_CERT_VALUE="$TLS_CERT_FILE"
+        TLS_KEY_VALUE="$TLS_KEY_FILE"
+    fi
+
+    H1_TLS_CERT="$TLS_CERT_VALUE" H1_TLS_KEY="$TLS_KEY_VALUE" \
     python3 -u - "$USERS_FILE" "$DOMAIN_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_PUBLIC_PORT_FILE" "$SUB_TOKEN_FILE" "$SUB_BIND_PORT" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$PEERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$DEVICES_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY' &
 import base64
 import datetime
@@ -7291,6 +7505,14 @@ def build_xhttp_vless(client_id, address, port, path, host_header, tag, security
     return url + f"#{tag}"
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ssl
+
+TLS_CERT = os.environ.get("H1_TLS_CERT", "")
+TLS_KEY = os.environ.get("H1_TLS_KEY", "")
+TLS_ON = bool(TLS_CERT and TLS_KEY and os.path.isfile(TLS_CERT) and os.path.isfile(TLS_KEY))
+URL_SCHEME = "https" if TLS_ON else "http"
+# peers тоже на self-signed сертификатах — проверку цепочки не делаем
+SSL_NOVERIFY = ssl._create_unverified_context()
 
 USERS_FILE = sys.argv[1]
 DOMAIN_FILE = sys.argv[2]
@@ -7419,7 +7641,7 @@ def sync_upstream_now(force=False):
         "User-Agent": "H1CloudVPNSubSync/1.0",
     })
 
-    with urllib.request.urlopen(req, timeout=6) as resp:
+    with urllib.request.urlopen(req, timeout=6, context=SSL_NOVERIFY) as resp:
         payload = json.loads(resp.read(1024 * 1024).decode("utf-8"))
 
     clients = payload.get("clients", [])
@@ -7628,7 +7850,7 @@ def fetch_peer_links(user):
             url += ("&" if "?" in url else "?") + "scope=local"
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "H1CloudVPNSub/1.0"})
-            with urllib.request.urlopen(req, timeout=6) as resp:
+            with urllib.request.urlopen(req, timeout=6, context=SSL_NOVERIFY) as resp:
                 text = resp.read(1024 * 512).decode("utf-8", "ignore")
         except Exception:
             continue
@@ -7702,7 +7924,7 @@ def make_links(user):
 def current_subscription_url(identifier, request_host="", include_name=True):
     quoted = urllib.parse.quote(identifier, safe="")
     host = request_host or f"{read_domain()}:{SUB_PORT}"
-    url = f"http://{host}/sub/{quoted}"
+    url = f"{URL_SCHEME}://{host}/sub/{quoted}"
     if include_name and SUB_NAME:
         url += "#" + urllib.parse.quote(SUB_NAME, safe="")
     return url
@@ -8033,6 +8255,10 @@ class ReuseServer(ThreadingHTTPServer):
 
 try:
     server = ReuseServer(("0.0.0.0", SUB_PORT), Handler)
+    if TLS_ON:
+        _tls_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        _tls_ctx.load_cert_chain(TLS_CERT, TLS_KEY)
+        server.socket = _tls_ctx.wrap_socket(server.socket, server_side=True)
 except OSError as exc:
     if exc.errno == 98:
         sys.stderr.write(
@@ -8051,8 +8277,8 @@ PY
     sleep 1
 
     if kill -0 "$SUB_PID" >/dev/null 2>&1; then
-        echo "subscription started: 0.0.0.0:$SUB_BIND_PORT"
-        echo "url format: http://$(read_subscription_host):$SUB_BIND_PORT/sub/CLIENT_UUID"
+        echo "subscription started: 0.0.0.0:$SUB_BIND_PORT ($(http_scheme))"
+        echo "url format: $(http_scheme)://$(read_subscription_host):$SUB_BIND_PORT/sub/CLIENT_UUID"
         log_action "sub_start" "0.0.0.0:$SUB_BIND_PORT pid=$SUB_PID"
         sync_keys_file >/dev/null 2>&1
         restart_api_if_running
@@ -8097,7 +8323,7 @@ cmd_sub() {
                 RUNNING_PORT="$(cat "$SUB_PORT_FILE" 2>/dev/null)"
                 echo "subscription running: 0.0.0.0:${RUNNING_PORT:-unknown}"
                 echo "pid: $SUB_PID"
-                echo "url format: http://$(read_subscription_host):${RUNNING_PORT:-PORT}/sub/CLIENT_UUID"
+                echo "url format: $(http_scheme)://$(read_subscription_host):${RUNNING_PORT:-PORT}/sub/CLIENT_UUID"
             else
                 echo "subscription stopped"
             fi
@@ -8151,11 +8377,11 @@ cmd_sub() {
             echo "vpn sub token           show legacy subscription token"
             echo "vpn sub url NAME        show subscription URL"
             print_line
-            echo "subscription URL: http://IP:PORT/sub/CLIENT_UUID"
-            echo "raw links:        http://IP:PORT/sub/CLIENT_UUID/raw"
-            echo "local links:      http://IP:PORT/sub/CLIENT_UUID/local"
-            echo "json:             http://IP:PORT/sub/CLIENT_UUID/json"
-            echo "legacy still works: http://IP:PORT/sub/NAME?token=TOKEN"
+            echo "subscription URL: $(http_scheme)://IP:PORT/sub/CLIENT_UUID"
+            echo "raw links:        $(http_scheme)://IP:PORT/sub/CLIENT_UUID/raw"
+            echo "local links:      $(http_scheme)://IP:PORT/sub/CLIENT_UUID/local"
+            echo "json:             $(http_scheme)://IP:PORT/sub/CLIENT_UUID/json"
+            echo "legacy still works: $(http_scheme)://IP:PORT/sub/NAME?token=TOKEN"
             print_line
             ;;
         *)
@@ -8353,10 +8579,13 @@ forward_client_to_upstream() {
 
     python3 - "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$ACTION" "$@" <<'PY'
 import json
+import ssl
 import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+
+SSL_NOVERIFY = ssl._create_unverified_context()
 
 url_file, token_file, action = sys.argv[1:4]
 args = sys.argv[4:]
@@ -8446,7 +8675,7 @@ req = urllib.request.Request(
 )
 
 try:
-    with urllib.request.urlopen(req, timeout=12) as resp:
+    with urllib.request.urlopen(req, timeout=12, context=SSL_NOVERIFY) as resp:
         text = resp.read(1024 * 1024).decode("utf-8", "ignore")
 except urllib.error.HTTPError as exc:
     text = exc.read().decode("utf-8", "ignore")
@@ -8493,11 +8722,14 @@ push_local_users_to_upstream() {
     python3 - "$USERS_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" <<'PY'
 import json
 import math
+import ssl
 import sys
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
+
+SSL_NOVERIFY = ssl._create_unverified_context()
 
 users_file, url_file, token_file = sys.argv[1:4]
 
@@ -8530,7 +8762,7 @@ def request(method, path, payload=None):
     if body is not None:
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(base_url + path, data=body, method=method, headers=headers)
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=10, context=SSL_NOVERIFY) as resp:
         text = resp.read(1024 * 1024).decode("utf-8", "ignore")
     return json.loads(text) if text else {}
 
@@ -8597,8 +8829,11 @@ sync_upstream_users() {
     python3 - "$USERS_FILE" "$UPSTREAM_URL" "$UPSTREAM_TOKEN" <<'PY'
 import json
 import os
+import ssl
 import sys
 import urllib.request
+
+SSL_NOVERIFY = ssl._create_unverified_context()
 
 users_file, base_url, token = sys.argv[1], sys.argv[2].rstrip("/"), sys.argv[3]
 url = base_url if base_url.endswith("/clients") else base_url + "/clients"
@@ -8606,7 +8841,7 @@ req = urllib.request.Request(url, headers={
     "Authorization": f"Bearer {token}",
     "User-Agent": "H1CloudVPNFederation/1.0",
 })
-with urllib.request.urlopen(req, timeout=10) as resp:
+with urllib.request.urlopen(req, timeout=10, context=SSL_NOVERIFY) as resp:
     payload = json.loads(resp.read().decode("utf-8"))
 
 clients = payload.get("clients", [])
@@ -8667,7 +8902,8 @@ sync_upstream_tick() {
         fi
     fi
 
-    BEFORE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    BEFORE="$USERS_SNAPSHOT"
     OUT="$(sync_upstream_users 2>&1)"
     RC="$?"
     if [ "$RC" -ne 0 ]; then
@@ -8679,7 +8915,8 @@ sync_upstream_tick() {
         return 0
     fi
 
-    AFTER="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    AFTER="$USERS_SNAPSHOT"
     if [ "$BEFORE" != "$AFTER" ]; then
         sync_keys_file >/dev/null 2>&1
         remember_users_state
@@ -8775,15 +9012,16 @@ cmd_join() {
         return 0
     fi
 
-    SUB_URL_VALUE="http://$(read_subscription_host):$SUB_PORT_VALUE/sub/{uuid}/local"
+    SUB_URL_VALUE="$(http_scheme)://$(read_subscription_host):$SUB_PORT_VALUE/sub/{uuid}/local"
     API_URL_VALUE=""
     if validate_port "$API_PORT_VALUE"; then
-        API_URL_VALUE="http://$(read_subscription_host):$API_PORT_VALUE/api"
+        API_URL_VALUE="$(http_scheme)://$(read_subscription_host):$API_PORT_VALUE/api"
     fi
 
     OUT="$(python3 - "$MASTER_URL" "$JOIN_TOKEN_VALUE" "$NODE_VALUE" "$SUB_URL_VALUE" "$API_URL_VALUE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" <<'PY'
 import json
 import os
+import ssl
 import sys
 import urllib.error
 import urllib.parse
@@ -8805,7 +9043,7 @@ req = urllib.request.Request(join_url, data=payload, method="POST", headers={
 })
 
 try:
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=10, context=ssl._create_unverified_context()) as resp:
         data = json.loads(resp.read().decode("utf-8"))
 except urllib.error.HTTPError as exc:
     body = exc.read().decode("utf-8", "ignore")
@@ -8911,6 +9149,7 @@ allowed = {
     "mws_enabled.txt", "mws_domain.txt", "mws_cert_file.txt", "mws_key_file.txt",
     "peers.txt", "nodes.json", "join_token.txt",
     "upstream_api_url.txt", "upstream_api_token.txt", "egress_xray_link.txt", "update_url.txt", "auto_update.txt",
+    "tls_enabled.txt", "tls_cert.pem", "tls_key.pem",
     "cdn_ws_enabled.txt", "cdn_ws_host.txt", "cdn_ws_sni.txt", "cdn_ws_port.txt", "cdn_ws_tag.txt", "cdn_ws_path.txt",
     "cdn_xhttp_enabled.txt", "cdn_xhttp_host.txt", "cdn_xhttp_sni.txt", "cdn_xhttp_port.txt", "cdn_xhttp_tag.txt", "cdn_xhttp_public_path.txt",
     "tag_ws.txt", "tag_xhttp.txt", "tag_reality.txt",
@@ -9136,12 +9375,15 @@ get_update_url() {
 }
 
 auto_update_enabled() {
-    local VALUE
+    local VALUE=""
     if [ ! -f "$AUTO_UPDATE_FILE" ]; then
         return 0
     fi
 
-    VALUE="$(head -n 1 "$AUTO_UPDATE_FILE" 2>/dev/null | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    # builtin-чтение вместо head|tr|tr: вызывается каждую секунду из цикла
+    IFS= read -r VALUE < "$AUTO_UPDATE_FILE" 2>/dev/null
+    VALUE="${VALUE,,}"
+    VALUE="${VALUE//[[:space:]]/}"
     case "$VALUE" in
         0|off|false|no|disabled)
             return 1
@@ -9435,21 +9677,21 @@ auto_update_tick() {
         return 0
     fi
 
-    URL="$(get_update_url)"
-    if [ -z "$URL" ]; then
+    printf -v NOW '%(%s)T' -1
+    LAST="$LAST_UPDATE_CHECK"
+    if [ -f "$UPDATE_LAST_CHECK_FILE" ] && [ -s "$UPDATE_LAST_CHECK_FILE" ]; then
+        IFS= read -r LAST < "$UPDATE_LAST_CHECK_FILE" 2>/dev/null
+    fi
+    case "$LAST" in
+        ''|*[!0-9]*) LAST=0 ;;
+    esac
+
+    if [ $((NOW - LAST)) -lt "$UPDATE_CHECK_INTERVAL" ]; then
         return 0
     fi
 
-    NOW="$(date +%s)"
-    LAST="$LAST_UPDATE_CHECK"
-    if [ -f "$UPDATE_LAST_CHECK_FILE" ] && [ -s "$UPDATE_LAST_CHECK_FILE" ]; then
-        LAST="$(cat "$UPDATE_LAST_CHECK_FILE" 2>/dev/null)"
-    fi
-    if ! echo "$LAST" | grep -Eq '^[0-9]+$'; then
-        LAST=0
-    fi
-
-    if [ $((NOW - LAST)) -lt "$UPDATE_CHECK_INTERVAL" ]; then
+    URL="$(get_update_url)"
+    if [ -z "$URL" ]; then
         return 0
     fi
 
@@ -9581,7 +9823,8 @@ cmd_status() {
 }
 
 sync_external_user_changes() {
-    CURRENT_USERS_STATE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    CURRENT_USERS_STATE="$USERS_SNAPSHOT"
 
     if [ -z "$USERS_STATE" ]; then
         USERS_STATE="$CURRENT_USERS_STATE"
@@ -9591,7 +9834,7 @@ sync_external_user_changes() {
     if [ "$CURRENT_USERS_STATE" != "$USERS_STATE" ]; then
         restart_xray >/dev/null 2>&1
         sync_keys_file >/dev/null 2>&1
-        USERS_STATE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+        remember_users_state
         echo "users synced from api"
     fi
 
@@ -9773,6 +10016,9 @@ handle_cmd() {
         api)
             cmd_api "${2:-}" "${3:-}" "${4:-}"
             ;;
+        ssl|tls|https)
+            cmd_ssl "${2:-}" "${3:-}" "${4:-}"
+            ;;
         sub|subscription)
             shift
             cmd_sub "$@"
@@ -9797,9 +10043,11 @@ handle_cmd() {
 }
 
 check_expired_loop_tick() {
-    BEFORE="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    BEFORE="$USERS_SNAPSHOT"
     prune_expired >/dev/null 2>&1
-    AFTER="$(cat "$USERS_FILE" 2>/dev/null || echo "[]")"
+    read_users_snapshot
+    AFTER="$USERS_SNAPSHOT"
 
     if [ "$BEFORE" != "$AFTER" ]; then
         restart_xray >/dev/null 2>&1
@@ -9933,7 +10181,7 @@ start_server() {
 
         sync_external_user_changes
 
-        NOW="$(date +%s)"
+        printf -v NOW '%(%s)T' -1
         if [ $((NOW - LAST_CHECK)) -ge "$CHECK_INTERVAL" ]; then
             check_expired_loop_tick
             LAST_CHECK="$NOW"
