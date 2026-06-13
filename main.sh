@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.13-updatse"
+SCRIPT_VERSION="2026.06.13-autorestart"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
@@ -50,6 +50,7 @@ ROUTER_BASE_FILE="$DATA_DIR/router_base.txt"
 ROUTER_SLUG_FILE="$DATA_DIR/router_slug.txt"
 ROUTER_TOKEN_FILE="$DATA_DIR/router_token.txt"
 ROUTER_DISABLED_FILE="$DATA_DIR/router_disabled.txt"
+AUTORESTART_FILE="$DATA_DIR/.h1cloud-autorestart-DONOTDEL"
 TRANSPORT_FILE="$DATA_DIR/transport.txt"
 XHTTP_PATH_FILE="$DATA_DIR/xhttp_path.txt"
 XHTTP_METHOD_FILE="$DATA_DIR/xhttp_method.txt"
@@ -10120,8 +10121,26 @@ cleanup() {
     exit 0
 }
 
+# Создаёт стартовый скрипт для авто-перезапуска панелью, если его ещё нет.
+# Нужен, чтобы Pterodactyl поднимал сервер сам после рестарта.
+ensure_autorestart_file() {
+    if [ -f "$AUTORESTART_FILE" ]; then
+        return 0
+    fi
+    cat > "$AUTORESTART_FILE" <<'EOF'
+#!/bin/bash
+cd /home/container
+export PATH="/home/container/.local/bin:$PATH"
+bash start.sh
+EOF
+    chmod +x "$AUTORESTART_FILE" >/dev/null 2>&1
+    return 0
+}
+
 start_server() {
     SERVER_MODE=1
+
+    ensure_autorestart_file
 
     init_files
     if [ "$?" -ne 0 ]; then
