@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.21-d-fp-subpage"
+SCRIPT_VERSION="2026.06.22-test-optimized"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
@@ -99,7 +99,11 @@ SUB_PID=""
 USERS_STATE=""
 CHECK_INTERVAL=300
 LIMIT_CHECK_INTERVAL=60
-FEDERATION_SYNC_INTERVAL=2
+FEDERATION_SYNC_INTERVAL=15
+# How long the idle console loop sleeps between maintenance ticks. This is the
+# MAX idle wait only: a typed command is handled the instant Enter is pressed,
+# read returns immediately. Bigger value = fewer wakeups = less idle CPU.
+POLL_INTERVAL=10
 UPDATE_CHECK_INTERVAL=3600
 LAST_UPDATE_CHECK=0
 UPDATE_APPLIED=0
@@ -10451,10 +10455,23 @@ start_server() {
     LAST_LIMIT_CHECK=0
 
     while true; do
-        sync_external_user_changes
-
-        if IFS= read -r -t 1 LINE; then
+        # Block here in the kernel until a command is typed OR POLL_INTERVAL
+        # seconds pass. While blocked the process uses ~0% CPU. A typed line is
+        # returned instantly (the timeout is only the max idle wait), so longer
+        # POLL_INTERVAL does NOT make commands feel slower.
+        LINE=""
+        if IFS= read -r -t "$POLL_INTERVAL" LINE; then
             handle_cmd "$LINE"
+        else
+            # read failed. bash returns >128 when the -t timeout actually
+            # elapsed (we already idled POLL_INTERVAL seconds — no throttling
+            # needed). It returns <=128 (usually 1) on EOF / non-interactive
+            # stdin, where read comes back INSTANTLY; without a sleep there this
+            # loop spins flat out and pins the CPU (the 200% bug). Sleep the
+            # same interval so an EOF stdin idles just as cheaply as a TTY.
+            if [ "$?" -le 128 ]; then
+                sleep "$POLL_INTERVAL"
+            fi
         fi
 
         sync_external_user_changes
