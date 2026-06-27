@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.22-test-optimized"
+SCRIPT_VERSION="2026.06.27-test-2"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
@@ -43,6 +43,8 @@ REALITY_DEST_FILE="$DATA_DIR/reality_dest.txt"
 REALITY_PORT_FILE="$DATA_DIR/reality_port.txt"
 REALITY_PUBLIC_PORT_FILE="$DATA_DIR/reality_public_port.txt"
 REALITY_FP_FILE="$DATA_DIR/reality_fp.txt"
+REALITY_FLOW_FILE="$DATA_DIR/reality_flow.txt"
+REALITY_SPX_FILE="$DATA_DIR/reality_spx.txt"
 SUB_TOKEN_FILE="$DATA_DIR/sub_token.txt"
 SUB_PORT_FILE="$DATA_DIR/sub_port.txt"
 SUB_PID_FILE="$DATA_DIR/sub.pid"
@@ -697,6 +699,62 @@ get_reality_fp() {
         FP_VALUE="$(normalize_reality_fp "$(head -n 1 "$REALITY_FP_FILE")")" && { echo "$FP_VALUE"; return 0; }
     fi
     echo "chrome"
+    return 0
+}
+
+# Reality flow shown in client links (flow= param) and on the xray inbound clients.
+# "on" -> xtls-rprx-vision (default), "off" -> empty (plain reality TCP).
+# When off, links omit &flow= and the inbound clients carry no "flow" field.
+normalize_reality_flow() {
+    local FLOW_VALUE
+    FLOW_VALUE="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')"
+    case "$FLOW_VALUE" in
+        on|vision|xtls-rprx-vision)
+            echo "xtls-rprx-vision"; return 0 ;;
+        off|none|disable|disabled|0|"")
+            echo ""; return 0 ;;
+        *)
+            return 1 ;;
+    esac
+}
+
+get_reality_flow() {
+    local FLOW_VALUE
+    if [ -n "${REALITY_FLOW+x}" ]; then
+        FLOW_VALUE="$(normalize_reality_flow "$REALITY_FLOW")" && { echo "$FLOW_VALUE"; return 0; }
+    fi
+    if [ -f "$REALITY_FLOW_FILE" ]; then
+        FLOW_VALUE="$(normalize_reality_flow "$(head -n 1 "$REALITY_FLOW_FILE" 2>/dev/null)")" && { echo "$FLOW_VALUE"; return 0; }
+    fi
+    echo "xtls-rprx-vision"
+    return 0
+}
+
+# Reality spiderX path shown in client links (spx= param). Client-side decoy only.
+normalize_reality_spx() {
+    local SPX_VALUE
+    SPX_VALUE="$(printf '%s' "${1:-}" | tr -d '[:space:]')"
+    if [ "$SPX_VALUE" = "random" ]; then
+        SPX_VALUE="/$(make_short_id | head -n 1 | tr -d '[:space:]')"
+    fi
+    [ -z "$SPX_VALUE" ] && SPX_VALUE="/"
+    case "$SPX_VALUE" in
+        /*) ;;
+        *) SPX_VALUE="/$SPX_VALUE" ;;
+    esac
+    echo "$SPX_VALUE"
+    return 0
+}
+
+get_reality_spx() {
+    local SPX_VALUE
+    if [ -n "${REALITY_SPX:-}" ]; then
+        SPX_VALUE="$(normalize_reality_spx "$REALITY_SPX")" && { echo "$SPX_VALUE"; return 0; }
+    fi
+    if [ -f "$REALITY_SPX_FILE" ] && [ -s "$REALITY_SPX_FILE" ]; then
+        SPX_VALUE="$(normalize_reality_spx "$(head -n 1 "$REALITY_SPX_FILE")")" && { echo "$SPX_VALUE"; return 0; }
+    fi
+    echo "/"
     return 0
 }
 
@@ -1863,7 +1921,7 @@ sync_keys_file() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    REALITY_FP="$(get_reality_fp)" python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
+    REALITY_FP="$(get_reality_fp)" REALITY_FLOW="$(get_reality_flow)" REALITY_SPX="$(get_reality_spx)" python3 - "$USERS_FILE" "$KEY_FILE" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_PORT_VALUE" "$SUB_TOKEN_VALUE" "$SUB_PUBLIC_HOST_VALUE" "$SUB_NAME_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRAFFIC_FILE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
 import datetime
 import json
 import os
@@ -2118,11 +2176,14 @@ def cdn_xhttp_link(name, uuid):
 
 def reality_link(name, uuid):
     tag = urllib.parse.quote(link_tag(node_name, tag_reality), safe="")
+    reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
+    flow_q = f"&flow={reality_flow}" if reality_flow else ""
+    reality_spx = urllib.parse.quote(os.environ.get("REALITY_SPX") or "/", safe="")
     return (
         f"vless://{uuid}@{reality_host}:{reality_port}"
         f"?type=tcp&security=reality&pbk={reality_public_key}&fp={os.environ.get('REALITY_FP') or 'chrome'}"
-        f"&sni={reality_sni}&sid={reality_short_id}&spx=%2F"
-        f"&flow=xtls-rprx-vision&encryption=none#{tag}"
+        f"&sni={reality_sni}&sid={reality_short_id}&spx={reality_spx}"
+        f"{flow_q}&encryption=none#{tag}"
     )
 
 def subscription_url(name, uuid):
@@ -2306,8 +2367,8 @@ build_config() {
         MWS_KEY_VALUE="$(get_mws_key_file)"
     fi
 
-    python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$MWS_ENABLED_VALUE" "$MWS_DOMAIN_VALUE" "$MWS_CERT_VALUE" "$MWS_KEY_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
-import json, sys, urllib.parse
+    REALITY_FLOW="$(get_reality_flow)" python3 - "$USERS_FILE" "$CONFIG_FILE" "$LOCAL_PORT" "$REALITY_ENABLED_VALUE" "$REALITY_LOCAL_PORT" "$REALITY_SNI_VALUE" "$REALITY_DEST_VALUE" "$REALITY_PRIVATE_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$XRAY_STATS_PORT" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$XHTTP_METHOD_VALUE" "$MWS_ENABLED_VALUE" "$MWS_DOMAIN_VALUE" "$MWS_CERT_VALUE" "$MWS_KEY_VALUE" "$EGRESS_XRAY_LINK_VALUE" <<'PY'
+import json, sys, urllib.parse, os
 
 users_file = sys.argv[1]
 config_file = sys.argv[2]
@@ -2329,6 +2390,7 @@ reality_sni = sys.argv[6]
 reality_dest = sys.argv[7]
 reality_private_key = sys.argv[8]
 reality_short_id = sys.argv[9]
+reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
 stats_port = int(sys.argv[10])
 transport = sys.argv[11] if len(sys.argv) > 11 else "ws"
 xhttp_path = sys.argv[12] if len(sys.argv) > 12 and sys.argv[12] else "/api/v1/sync/"
@@ -2371,11 +2433,13 @@ for u in users:
         "email": name
     })
     if reality_enabled:
-        reality_clients.append({
+        rc = {
             "id": uuid,
             "email": name + "-reality",
-            "flow": "xtls-rprx-vision"
-        })
+        }
+        if reality_flow:
+            rc["flow"] = reality_flow
+        reality_clients.append(rc)
 
 def _first(params, key, default=""):
     values = params.get(key)
@@ -2863,7 +2927,7 @@ make_link() {
         CDN_XHTTP_PUBLIC_PATH_VALUE="$(get_cdn_xhttp_public_path)"
     fi
 
-    REALITY_FP="$(get_reality_fp)" python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$(get_xhttp_method)" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
+    REALITY_FP="$(get_reality_fp)" REALITY_FLOW="$(get_reality_flow)" REALITY_SPX="$(get_reality_spx)" python3 - "$USERS_FILE" "$NAME" "$PUBLIC_DOMAIN" "$WS_PUBLIC_PORT_VALUE" "$NODE_NAME_VALUE" "$REALITY_ENABLED_VALUE" "$REALITY_PUBLIC_PORT_VALUE" "$REALITY_PUBLIC_HOST_VALUE" "$REALITY_SNI_VALUE" "$REALITY_PUBLIC_KEY_VALUE" "$REALITY_SHORT_ID_VALUE" "$SUB_URL_VALUE" "$CDN_WS_ENABLED_VALUE" "$CDN_WS_HOST_VALUE" "$CDN_WS_SNI_VALUE" "$CDN_WS_PORT_VALUE" "$CDN_WS_TAG_VALUE" "$CDN_WS_PATH_VALUE" "$TRANSPORT_VALUE" "$XHTTP_PATH_VALUE" "$(get_xhttp_method)" "$CDN_XHTTP_ENABLED_VALUE" "$CDN_XHTTP_HOST_VALUE" "$CDN_XHTTP_SNI_VALUE" "$CDN_XHTTP_PORT_VALUE" "$CDN_XHTTP_TAG_VALUE" "$CDN_XHTTP_PUBLIC_PATH_VALUE" <<'PY'
 import json, sys
 import os
 import urllib.parse
@@ -3074,11 +3138,14 @@ for u in users:
             print(cdn_link)
         if reality_enabled:
             reality_tag = urllib.parse.quote(link_tag(node_name, tag_reality), safe="")
+            reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
+            flow_q = f"&flow={reality_flow}" if reality_flow else ""
+            reality_spx = urllib.parse.quote(os.environ.get("REALITY_SPX") or "/", safe="")
             reality_link = (
                 f"vless://{uuid}@{reality_host}:{reality_port}"
                 f"?type=tcp&security=reality&pbk={reality_public_key}&fp={os.environ.get('REALITY_FP') or 'chrome'}"
-                f"&sni={reality_sni}&sid={reality_short_id}&spx=%2F"
-                f"&flow=xtls-rprx-vision&encryption=none#{reality_tag}"
+                f"&sni={reality_sni}&sid={reality_short_id}&spx={reality_spx}"
+                f"{flow_q}&encryption=none#{reality_tag}"
             )
             print("reality:")
             print(reality_link)
@@ -4135,6 +4202,8 @@ cmd_reality() {
                 echo "public key: $(read_reality_public_key)"
                 echo "short id: $(read_reality_short_id)"
                 echo "fingerprint: $(get_reality_fp)"
+                echo "flow: $(get_reality_flow | sed 's/^$/(off)/')"
+                echo "spx: $(get_reality_spx)"
             else
                 echo "status: disabled"
                 echo "enable: vpn reality PORT [PUBLIC_PORT] [SNI] [DEST]"
@@ -4160,6 +4229,43 @@ cmd_reality() {
             restart_sub_if_running
             log_action "reality_fp" "$NEW_FP"
             echo "reality fingerprint set: $NEW_FP"
+            ;;
+        flow)
+            if [ -z "${2:-}" ]; then
+                CUR_FLOW="$(get_reality_flow)"
+                [ -z "$CUR_FLOW" ] && CUR_FLOW="(off)"
+                echo "flow: $CUR_FLOW"
+                echo "set: vpn reality flow on|off"
+                echo "on = xtls-rprx-vision, off = plain reality tcp"
+                return 0
+            fi
+            NEW_FLOW="$(normalize_reality_flow "$2")" || {
+                echo "bad flow: $2"
+                echo "valid: on off"
+                return 0
+            }
+            printf '%s\n' "$NEW_FLOW" > "$REALITY_FLOW_FILE"
+            sync_keys_file >/dev/null 2>&1
+            remember_users_state
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "reality_flow" "${NEW_FLOW:-off}"
+            echo "reality flow set: ${NEW_FLOW:-off}"
+            ;;
+        spx|spiderx)
+            if [ -z "${2:-}" ]; then
+                echo "spx: $(get_reality_spx)"
+                echo "set: vpn reality spx PATH|random"
+                return 0
+            fi
+            NEW_SPX="$(normalize_reality_spx "$2")"
+            printf '%s\n' "$NEW_SPX" > "$REALITY_SPX_FILE"
+            sync_keys_file >/dev/null 2>&1
+            remember_users_state
+            restart_api_if_running
+            restart_sub_if_running
+            log_action "reality_spx" "$NEW_SPX"
+            echo "reality spx set: $NEW_SPX"
             ;;
         off|disable|disabled|stop)
             set_reality_enabled 0
@@ -5003,6 +5109,8 @@ start_api_process() {
     fi
 
     export REALITY_FP="$(get_reality_fp)"
+    export REALITY_FLOW="$(get_reality_flow)"
+    export REALITY_SPX="$(get_reality_spx)"
     export SUB_PAGE_TITLE="$(get_sub_title)"
     export SUB_PAGE_DESC="$(get_sub_desc)"
     export SUB_SUPPORT_URL="$(get_sub_support_url)"
@@ -5850,11 +5958,14 @@ def make_reality_link(user):
     client_id = str(user.get("uuid", ""))
     host = REALITY_PUBLIC_HOST or read_domain()
     tag = urllib.parse.quote(link_tag(read_node_name() or read_domain(), read_tag_suffix("tag_reality.txt", "Reality")), safe="")
+    reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
+    flow_q = f"&flow={reality_flow}" if reality_flow else ""
+    reality_spx = urllib.parse.quote(os.environ.get("REALITY_SPX") or "/", safe="")
     return (
         f"vless://{client_id}@{host}:{PUBLIC_REALITY_PORT}"
         f"?type=tcp&security=reality&pbk={REALITY_PUBLIC_KEY}&fp={os.environ.get('REALITY_FP') or 'chrome'}"
-        f"&sni={REALITY_SNI}&sid={REALITY_SHORT_ID}&spx=%2F"
-        f"&flow=xtls-rprx-vision&encryption=none#{tag}"
+        f"&sni={REALITY_SNI}&sid={REALITY_SHORT_ID}&spx={reality_spx}"
+        f"{flow_q}&encryption=none#{tag}"
     )
 
 
@@ -6051,11 +6162,14 @@ def write_config(users):
         try:
             clients.append({"id": str(user["uuid"]), "email": str(user["name"])})
             if REALITY_ENABLED:
-                reality_clients.append({
+                rc = {
                     "id": str(user["uuid"]),
                     "email": f"{user['name']}-reality",
-                    "flow": "xtls-rprx-vision",
-                })
+                }
+                _reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
+                if _reality_flow:
+                    rc["flow"] = _reality_flow
+                reality_clients.append(rc)
         except Exception:
             pass
 
@@ -7623,6 +7737,8 @@ start_sub_process() {
     echo "$SUB_BIND_PORT" > "$SUB_PORT_FILE"
 
     export REALITY_FP="$(get_reality_fp)"
+    export REALITY_FLOW="$(get_reality_flow)"
+    export REALITY_SPX="$(get_reality_spx)"
     export SUB_PAGE_TITLE="$(get_sub_title)"
     export SUB_PAGE_DESC="$(get_sub_desc)"
     export SUB_SUPPORT_URL="$(get_sub_support_url)"
@@ -8167,11 +8283,14 @@ def make_links(user):
         links.append(build_xhttp_vless(client_id, CDN_XHTTP_HOST, CDN_XHTTP_PORT, CDN_XHTTP_PUBLIC_PATH, CDN_XHTTP_SNI, cdn_tag, security="tls", sni=CDN_XHTTP_SNI, method=XHTTP_METHOD))
     if REALITY_ENABLED:
         reality_tag = urllib.parse.quote(link_tag(node_name(), tag_reality), safe="")
+        reality_flow = os.environ.get("REALITY_FLOW", "xtls-rprx-vision")
+        flow_q = f"&flow={reality_flow}" if reality_flow else ""
+        reality_spx = urllib.parse.quote(os.environ.get("REALITY_SPX") or "/", safe="")
         reality = (
             f"vless://{client_id}@{reality_host}:{reality_public_port}"
             f"?type=tcp&security=reality&pbk={reality_public_key}&fp={os.environ.get('REALITY_FP') or 'chrome'}"
-            f"&sni={reality_sni}&sid={reality_short_id}&spx=%2F"
-            f"&flow=xtls-rprx-vision&encryption=none#{reality_tag}"
+            f"&sni={reality_sni}&sid={reality_short_id}&spx={reality_spx}"
+            f"{flow_q}&encryption=none#{reality_tag}"
         )
         links.append(reality)
     return links
@@ -9364,7 +9483,7 @@ cmd_backup() {
     case "$ACTION" in
         create|"")
             mkdir -p "$BACKUP_DIR" >/dev/null 2>&1
-            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$MWS_ENABLED_FILE" "$MWS_DOMAIN_FILE" "$MWS_CERT_FILE" "$MWS_KEY_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$EGRESS_XRAY_LINK_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$REALITY_FP_FILE" "$SUB_TITLE_FILE" "$SUB_DESC_FILE" "$SUB_SUPPORT_URL_FILE" "$SUB_SUPPORT_TEXT_FILE" "$SUB_ACCENT_FILE" "$PUBLIC_IP_FILE" <<'PY'
+            python3 - "$BACKUP_DIR" "$USERS_FILE" "$DEVICES_FILE" "$TRAFFIC_FILE" "$DOMAIN_FILE" "$CONFIG_FILE" "$KEY_FILE" "$NODE_NAME_FILE" "$ACTION_LOG_FILE" "$API_TOKEN_FILE" "$SUB_TOKEN_FILE" "$SUB_NAME_FILE" "$TRANSPORT_FILE" "$XHTTP_PATH_FILE" "$XHTTP_METHOD_FILE" "$XHTTP_ALPN_FILE" "$MWS_ENABLED_FILE" "$MWS_DOMAIN_FILE" "$MWS_CERT_FILE" "$MWS_KEY_FILE" "$PEERS_FILE" "$NODES_FILE" "$JOIN_TOKEN_FILE" "$UPSTREAM_API_URL_FILE" "$UPSTREAM_API_TOKEN_FILE" "$EGRESS_XRAY_LINK_FILE" "$UPDATE_URL_FILE" "$AUTO_UPDATE_FILE" "$CDN_WS_ENABLED_FILE" "$CDN_WS_HOST_FILE" "$CDN_WS_SNI_FILE" "$CDN_WS_PORT_FILE" "$CDN_WS_TAG_FILE" "$CDN_WS_PATH_FILE" "$CDN_XHTTP_ENABLED_FILE" "$CDN_XHTTP_HOST_FILE" "$CDN_XHTTP_SNI_FILE" "$CDN_XHTTP_PORT_FILE" "$CDN_XHTTP_TAG_FILE" "$CDN_XHTTP_PUBLIC_PATH_FILE" "$TAG_WS_FILE" "$TAG_XHTTP_FILE" "$TAG_REALITY_FILE" "$REALITY_ENABLED_FILE" "$REALITY_PRIVATE_KEY_FILE" "$REALITY_PUBLIC_KEY_FILE" "$REALITY_SHORT_ID_FILE" "$REALITY_SNI_FILE" "$REALITY_DEST_FILE" "$REALITY_PORT_FILE" "$REALITY_PUBLIC_PORT_FILE" "$REALITY_FP_FILE" "$REALITY_FLOW_FILE" "$REALITY_SPX_FILE" "$SUB_TITLE_FILE" "$SUB_DESC_FILE" "$SUB_SUPPORT_URL_FILE" "$SUB_SUPPORT_TEXT_FILE" "$SUB_ACCENT_FILE" "$PUBLIC_IP_FILE" <<'PY'
 import datetime
 import os
 import sys
@@ -9418,7 +9537,7 @@ allowed = {
     "tag_ws.txt", "tag_xhttp.txt", "tag_reality.txt",
     "reality_enabled.txt", "reality_private_key.txt", "reality_public_key.txt",
     "reality_short_id.txt", "reality_sni.txt", "reality_dest.txt",
-    "reality_port.txt", "reality_public_port.txt", "reality_fp.txt", "public_ip.txt",
+    "reality_port.txt", "reality_public_port.txt", "reality_fp.txt", "reality_flow.txt", "reality_spx.txt", "public_ip.txt",
     "sub_title.txt", "sub_desc.txt", "sub_support_url.txt", "sub_support_text.txt", "sub_accent.txt",
 }
 with zipfile.ZipFile(backup, "r") as zf:
