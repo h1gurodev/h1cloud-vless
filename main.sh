@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.06.27-test-2"
+SCRIPT_VERSION="2026.06.30-test-3"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
@@ -19,7 +19,10 @@ blank() {
     printf ' \n'
 }
 
-XRAY_URL="https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
+# Pin a specific Xray-core version. The node force-installs exactly this build:
+# if a different version is already present, it is replaced on next start.
+XRAY_VERSION="26.3.27"
+XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip"
 DATA_DIR="."
 USERS_FILE="$DATA_DIR/users.json"
 DEVICES_FILE="$DATA_DIR/devices.json"
@@ -189,8 +192,18 @@ except Exception:
         json.dump([], f)
 PY
 
+    # Force the pinned version: if a binary exists but reports a different
+    # version, drop it so the block below re-downloads v$XRAY_VERSION.
+    if [ -f "$XRAY_BIN" ] && [ -n "$XRAY_VERSION" ]; then
+        INSTALLED_XRAY_VERSION="$("$XRAY_BIN" version 2>/dev/null | head -n1 | awk '{print $2}')"
+        if [ "$INSTALLED_XRAY_VERSION" != "$XRAY_VERSION" ]; then
+            echo "xray $INSTALLED_XRAY_VERSION installed, pinned $XRAY_VERSION -> reinstalling"
+            rm -f "$XRAY_BIN"
+        fi
+    fi
+
     if [ ! -f "$XRAY_BIN" ]; then
-        echo "downloading xray..."
+        echo "downloading xray v$XRAY_VERSION..."
 
         curl -fL -o xray.zip "$XRAY_URL"
         if [ "$?" -ne 0 ]; then
