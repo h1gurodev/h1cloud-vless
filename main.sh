@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.01-test-6"
+SCRIPT_VERSION="2026.07.10-split-egress-1"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
@@ -2556,6 +2556,33 @@ def direct_outbound_from_link(link):
 
     return outbound
 
+
+def build_egress_config(egress_xray_link):
+    # Селективный egress: RU (домены+IP) напрямую, всё остальное через релей.
+    # Без egress-ссылки — всё напрямую (поведение как раньше, полностью совместимо).
+    eg = direct_outbound_from_link(egress_xray_link)
+    if not egress_xray_link:
+        return (
+            [eg, {"protocol": "freedom", "tag": "api"}],
+            {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
+        )
+    eg["tag"] = "proxy"
+    outbounds = [
+        eg,
+        {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIPv4"}},
+        {"protocol": "freedom", "tag": "api"},
+    ]
+    routing = {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+            {"type": "field", "domain": ["geosite:category-ru", "geosite:private"], "outboundTag": "direct"},
+            {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
+        ],
+    }
+    return (outbounds, routing)
+
+
 main_inbound = {
     "port": port,
     "tag": "xhttp-in" if transport == "xhttp" else "ws-in",
@@ -2662,22 +2689,8 @@ config = {
             }
         }
     ],
-    "outbounds": [
-        direct_outbound_from_link(egress_xray_link),
-        {
-            "protocol": "freedom",
-            "tag": "api"
-        }
-    ],
-    "routing": {
-        "rules": [
-            {
-                "type": "field",
-                "inboundTag": ["api"],
-                "outboundTag": "api"
-            }
-        ]
-    }
+    "outbounds": build_egress_config(egress_xray_link)[0],
+    "routing": build_egress_config(egress_xray_link)[1]
 }
 
 if reality_enabled:
@@ -5933,6 +5946,32 @@ def direct_outbound_from_link(link):
     return outbound
 
 
+def build_egress_config(egress_xray_link):
+    # Селективный egress: RU (домены+IP) напрямую, всё остальное через релей.
+    # Без egress-ссылки — всё напрямую (поведение как раньше, полностью совместимо).
+    eg = direct_outbound_from_link(egress_xray_link)
+    if not egress_xray_link:
+        return (
+            [eg, {"protocol": "freedom", "tag": "api"}],
+            {"rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}]},
+        )
+    eg["tag"] = "proxy"
+    outbounds = [
+        eg,
+        {"protocol": "freedom", "tag": "direct", "settings": {"domainStrategy": "UseIPv4"}},
+        {"protocol": "freedom", "tag": "api"},
+    ]
+    routing = {
+        "domainStrategy": "IPIfNonMatch",
+        "rules": [
+            {"type": "field", "inboundTag": ["api"], "outboundTag": "api"},
+            {"type": "field", "domain": ["geosite:category-ru", "geosite:private"], "outboundTag": "direct"},
+            {"type": "field", "ip": ["geoip:ru", "geoip:private"], "outboundTag": "direct"},
+        ],
+    }
+    return (outbounds, routing)
+
+
 def make_ws_link(user):
     name = str(user.get("name", ""))
     client_id = str(user.get("uuid", ""))
@@ -6283,13 +6322,8 @@ def write_config(users):
                 "settings": {"address": "127.0.0.1"},
             }
         ],
-        "outbounds": [
-            direct_outbound_from_link(egress_xray_link),
-            {"protocol": "freedom", "tag": "api"},
-        ],
-        "routing": {
-            "rules": [{"type": "field", "inboundTag": ["api"], "outboundTag": "api"}],
-        },
+        "outbounds": build_egress_config(egress_xray_link)[0],
+        "routing": build_egress_config(egress_xray_link)[1],
     }
     if REALITY_ENABLED:
         config["inbounds"].append({
