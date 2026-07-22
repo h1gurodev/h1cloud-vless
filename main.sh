@@ -4,7 +4,8 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.18-panel-hacker-51"
+SCRIPT_VERSION="2026.07.22-panel-hacker-52"
+export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
 # (см. get_update_url) — иначе нода исполняла бы чужой скрипт.
@@ -8119,10 +8120,34 @@ def shopbot_status():
     }
 
 
+def _shopbot_patch_stale():
+    """Файлы патча в боте отличаются от актуальных — бот крутит старый код модулей."""
+    try:
+        app_dir = os.path.join(SHOPBOT_DIR, "app", "bot")
+        with open(os.path.join(app_dir, "h1_license.py"), encoding="utf-8") as fh:
+            if fh.read() != H1_LICENSE_PY:
+                return True
+        with open(os.path.join(app_dir, "handlers", "h1_locks.py"), encoding="utf-8") as fh:
+            if fh.read() != H1_LOCKS_PY:
+                return True
+        return False
+    except Exception:
+        return True
+
+
 def _shopbot_autostart():
     try:
         cfg = load_shopbot_cfg()
-        if cfg.get("autostart") and shopbot_installed() and not shopbot_running():
+        if not shopbot_installed():
+            return
+        if shopbot_running():
+            # панель обновилась, а бот держит старый патч модулей в памяти —
+            # без этого выданные /h1unlock лицензии не отображаются у клиента
+            if _shopbot_patch_stale():
+                log_action("shopbot_patch_refresh", "restart after panel update")
+                shopbot_stop()
+                shopbot_start(cfg)
+        elif cfg.get("autostart"):
             shopbot_start(cfg)
     except Exception:
         pass
@@ -8512,6 +8537,7 @@ def status_payload(users):
     return {
         "ok": True,
         "service": "vpn-api",
+        "version": os.environ.get("SCRIPT_VERSION") or "",
         "node_name": read_node_name(),
         "domain": read_domain(),
         "api": {
@@ -9470,6 +9496,7 @@ nav a.act {
       <div class="row"><span class="led" id="ledXray"></span><span>XRAY CORE</span></div>
       <div class="row"><span class="led on"></span><span>API</span></div>
       <div class="row dim" id="verRow">v: —</div>
+      <div class="row dim" id="verVersion"></div>
       <button class="ghost" id="logoutBtn" style="justify-content:flex-start;padding:4px 0;">выйти</button>
     </div>
   </aside>
@@ -10515,6 +10542,7 @@ function paintChrome() {
   $("topTransport").textContent = tr + (STATUS.reality && STATUS.reality.enabled ? " + REALITY" : "");
   $("ledXray").className = "led on";
   $("verRow").textContent = "node: " + (STATUS.node_name || "—");
+  $("verVersion").textContent = STATUS.version ? "panel: " + STATUS.version.replace(/^\d{4}\.\d{2}\.\d{2}-panel-/, "") + " (" + STATUS.version.split("-")[0] + ")" : "";
 }
 
 /* ---------------- views ---------------- */
