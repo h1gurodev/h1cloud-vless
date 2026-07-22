@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.18-panel-hacker-49"
+SCRIPT_VERSION="2026.07.18-panel-hacker-50"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
 # (см. get_update_url) — иначе нода исполняла бы чужой скрипт.
@@ -7438,13 +7438,31 @@ PRICE_ADMIN = int(os.getenv("H1_PRICE_ADMIN", "500") or 500)
 PRICE_WEBAPP = int(os.getenv("H1_PRICE_WEBAPP", "5000") or 5000)
 LICENSE_FILE = os.getenv("H1_LICENSE_FILE") or "/home/container/shopbot_license.json"
 SUB_BASE = (os.getenv("H1_SUB_BASE") or "").rstrip("/")
-# Telegram открывает Mini App ТОЛЬКО по https — панель отдаёт сюда адрес
-# привязанного SSL-домена, иначе пусто (кнопку Menu тогда не ставим).
-WEBAPP_URL = (os.getenv("H1_WEBAPP_URL") or "").rstrip("/")
+# Telegram открывает Mini App ТОЛЬКО по https. Адрес считаем ДИНАМИЧЕСКИ от
+# текущей лицензии (а не замораживаем из .env): купил → своя/оплаченная
+# страница, забрали лицензию → снова общая витрина «не подключено».
+WEBAPP_SHARED_URL = (os.getenv("H1_WEBAPP_SHARED_URL") or "").rstrip("/").split("?")[0]
+WEBAPP_OWN_URL = (os.getenv("H1_WEBAPP_OWN_URL") or "").rstrip("/")
+# Старый одиночный вар — фолбэк, если панель ещё не обновила .env.
+_LEGACY_URL = (os.getenv("H1_WEBAPP_URL") or "").rstrip("/")
+
+
+def webapp_url():
+    paid = is_licensed("webapp")
+    if paid and WEBAPP_OWN_URL.startswith("https://"):
+        return WEBAPP_OWN_URL
+    base = WEBAPP_SHARED_URL or _LEGACY_URL.split("?")[0]
+    if not base:
+        return ""
+    return base + "?paid=1" if paid else base
 
 
 def webapp_ready():
-    return WEBAPP_URL.startswith("https://")
+    return webapp_url().startswith("https://")
+
+
+# Совместимость со старым кодом, который читал константу.
+WEBAPP_URL = _LEGACY_URL
 
 KEYS = ("admin_panel", "webapp")
 TITLES = {"admin_panel": "Админ-панель", "webapp": "Веб-приложение"}
@@ -7531,18 +7549,19 @@ router = Router(name="h1_locks")
 async def apply_menu_button(bot: Bot) -> bool:
     """Синяя кнопка Menu слева от поля ввода. Ставим её ВСЕГДА (если есть https):
     страница /webapp сама решает — показать магазин или экран «заблокировано»."""
-    if not lic.webapp_ready():
+    url = lic.webapp_url()
+    if not url.startswith("https://"):
         logger.warning(
-            "H1: кнопка Menu не поставлена — нужен https. Сейчас H1_WEBAPP_URL=%r. "
+            "H1: кнопка Menu не поставлена — нужен https. Сейчас url=%r. "
             "Привяжите домен с SSL во вкладке «Домены» панели.",
-            lic.WEBAPP_URL,
+            url,
         )
         return False
     try:
         await bot.set_chat_menu_button(
-            menu_button=MenuButtonWebApp(text="WebApp", web_app=WebAppInfo(url=lic.WEBAPP_URL))
+            menu_button=MenuButtonWebApp(text="WebApp", web_app=WebAppInfo(url=url))
         )
-        logger.info("H1: кнопка Menu -> %s", lic.WEBAPP_URL)
+        logger.info("H1: кнопка Menu -> %s", url)
         return True
     except Exception as exc:
         logger.warning("H1: не удалось поставить кнопку Menu: %s", exc)
@@ -7609,7 +7628,7 @@ async def open_webapp(cb: CallbackQuery) -> None:
         "\\U0001F310 <b>Веб-приложение</b>\\n\\nОткройте магазин прямо в Telegram:",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="\\U0001F680 Открыть приложение", web_app=WebAppInfo(url=lic.WEBAPP_URL))],
+                [InlineKeyboardButton(text="\\U0001F680 Открыть приложение", web_app=WebAppInfo(url=lic.webapp_url()))],
                 [InlineKeyboardButton(text="\\u2B05\\uFE0F В меню", callback_data="menu:main")],
             ]
         ),
@@ -7808,6 +7827,14 @@ def shopbot_sub_base():
     return "http://" + read_domain() + ":" + str(API_PORT)
 
 
+def shopbot_webapp_own_url():
+    """https-адрес Mini App на СОБСТВЕННОМ домене ноды (пусто, если домена нет)."""
+    dom = web_domain_active("sub") or web_domain_active("panel")
+    if dom:
+        return "https://" + dom + "/webapp"
+    return ""
+
+
 def shopbot_webapp_url():
     """https-адрес Mini App для кнопки Menu.
 
@@ -7892,6 +7919,10 @@ def shopbot_write_config(cfg):
         "H1_PRICE_ADMIN=" + str(SHOPBOT_ADMIN_PRICE),
         "H1_PRICE_WEBAPP=" + str(SHOPBOT_WEBAPP_PRICE),
         "H1_SUB_BASE=" + sub_base,
+        # Бот выбирает адрес Mini App САМ по текущей лицензии (см. h1_license.py):
+        # тут только исходные данные, а не готовый URL — иначе он замораживается.
+        "H1_WEBAPP_SHARED_URL=" + SHOPBOT_WEBAPP_SHARED_URL,
+        "H1_WEBAPP_OWN_URL=" + shopbot_webapp_own_url(),
         "H1_WEBAPP_URL=" + shopbot_webapp_url(),
         "",
     ]
