@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.22-panel-hacker-56"
+SCRIPT_VERSION="2026.07.23-panel-hacker-57"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -8489,11 +8489,39 @@ def _xui_fetch(url, username, password):
         remark = str(ib.get("remark") or ("inbound-" + str(ib.get("id"))))
         inbounds.append({"remark": remark, "port": ib.get("port"),
                          "protocol": str(ib.get("protocol") or ""), "enabled": bool(ib.get("enable", True))})
-        try:
-            settings = json.loads(ib.get("settings") or "{}")
-        except Exception:
-            settings = {}
-        for c in (settings.get("clients") or []):
+        def _parse_settings(obj):
+            s = obj.get("settings")
+            if isinstance(s, str):
+                try:
+                    s = json.loads(s or "{}")
+                except Exception:
+                    s = {}
+            return s if isinstance(s, dict) else {}
+
+        # settings в разных сборках 3x-ui — то JSON-СТРОКА, то уже готовый dict
+        settings = _parse_settings(ib)
+        raw_clients = settings.get("clients")
+        if not isinstance(raw_clients, list):
+            raw_clients = []
+        # список иногда НЕ отдаёт clients — дотягиваем полную карточку инбаунда
+        if not raw_clients and ib.get("id") is not None:
+            for m in ("GET", "POST"):
+                try:
+                    dresp = _mig_http(m, base + "/panel/api/inbounds/get/" + str(ib.get("id")),
+                                      hdrs, b"" if m == "POST" else None)
+                    dd = json.loads(dresp.read().decode("utf-8", "replace"))
+                    if isinstance(dd, dict) and dd.get("obj"):
+                        rc = _parse_settings(dd["obj"]).get("clients")
+                        if isinstance(rc, list) and rc:
+                            raw_clients = rc
+                            break
+                except Exception:
+                    continue
+        # последний фолбэк — clientStats (email + traffic, но без uuid)
+        if not raw_clients and isinstance(ib.get("clientStats"), list):
+            raw_clients = [{"email": s.get("email"), "enable": s.get("enable", True),
+                            "totalGB": s.get("total") or 0} for s in ib["clientStats"] if isinstance(s, dict)]
+        for c in raw_clients:
             if not isinstance(c, dict):
                 continue
             exp = c.get("expiryTime") or 0
@@ -8510,7 +8538,7 @@ def _xui_fetch(url, username, password):
                 total = 0
             clients.append({
                 "name": str(c.get("email") or "").strip(),
-                "uuid": str(c.get("id") or "").strip(),
+                "uuid": str(c.get("id") or c.get("password") or "").strip(),
                 "proto": str(ib.get("protocol") or ""), "inbound": remark,
                 "expires_ms": exp, "limit_bytes": total if total > 0 else 0,
                 "device_limit": parse_int(c.get("limitIp"), 0) or 0,
@@ -8525,7 +8553,14 @@ def _remna_fetch(url, token):
     headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
     users, start, size = [], 0, 250
     while True:
-        resp = _mig_http("GET", base + "/api/users?start=%d&size=%d" % (start, size), headers)
+        try:
+            resp = _mig_http("GET", base + "/api/users?start=%d&size=%d" % (start, size), headers)
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise ValueError("Remnawave отклонил токен (%s). Проверь API-токен и адрес панели." % exc.code)
+            if exc.code == 404:
+                raise ValueError("Remnawave: нет /api/users (404). Проверь адрес панели.")
+            raise ValueError("Remnawave вернул HTTP %s." % exc.code)
         data = json.loads(resp.read().decode("utf-8", "replace"))
         payload = data.get("response") if isinstance(data, dict) and isinstance(data.get("response"), dict) else data
         if isinstance(payload, dict):
@@ -13132,6 +13167,7 @@ async function migStart(btn) {
   if (btn) btn.disabled = true;
   try {
     await api("/migrate/start", { method: "POST", body: MIG_FORM });
+    MIG_LAST_DONE = "";  // новый прогон — разрешаем объявить его результат
     toast("Миграция запущена");
     migPoll(true);
   } catch (e) {
@@ -13186,6 +13222,7 @@ function migStat(label, val, kind) {
   ]);
 }
 
+let MIG_LAST_DONE = "";  // подпись завершённого прогона — чтобы не спамить тостом/рефрешем
 async function migPoll(force) {
   const box = $("migStatusBox");
   if (!box) { if (MIG_TIMER) { clearInterval(MIG_TIMER); MIG_TIMER = null; } return; }
@@ -13195,8 +13232,14 @@ async function migPoll(force) {
     migRenderStatus(box, m);
     if (!m.running && (m.phase === "done" || m.phase === "error" || m.phase === "idle")) {
       if (MIG_TIMER) { clearInterval(MIG_TIMER); MIG_TIMER = null; }
-      if (m.phase === "done") { toast("Миграция завершена: +" + (m.imported || 0)); refresh(); }
-    } else if (!MIG_TIMER) {
+      // объявляем результат РОВНО один раз на прогон (никакого refresh() — он бы
+      // перерисовал вкладку и снова вызвал migPoll → бесконечный цикл тостов)
+      const key = m.phase + ":" + (m.imported || 0) + ":" + (m.skipped || 0) + ":" + (m.failed || 0) + ":" + ((m.log || []).length);
+      if (m.phase === "done" && key !== MIG_LAST_DONE) {
+        MIG_LAST_DONE = key;
+        toast("Миграция завершена: +" + (m.imported || 0));
+      }
+    } else if (m.running && !MIG_TIMER) {
       MIG_TIMER = setInterval(() => migPoll(false), 1200);
     }
   } catch (e) { /* тихо, панель могла перезапускаться */ }
