@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.22-panel-hacker-54"
+SCRIPT_VERSION="2026.07.22-panel-hacker-55"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -8365,13 +8365,27 @@ def _mig_log(msg, kind="info"):
         MIGRATE_STATE["log"] = MIGRATE_STATE["log"][-400:]
 
 
+_MIG_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+           "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+
+
 def _mig_http(method, url, headers=None, body=None, timeout=25):
     import ssl as _ssl
     ctx = _ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = _ssl.CERT_NONE  # чужие панели почти всегда на самоподписанных сертах
-    req = urllib.request.Request(url, data=body, method=method)
+    # Многие 3x-ui/Remnawave стоят за nginx/WAF, который 403-ит голый Python-urllib —
+    # представляемся браузером и шлём типичные заголовки.
+    base_headers = {
+        "User-Agent": _MIG_UA,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9,ru;q=0.8",
+        "X-Requested-With": "XMLHttpRequest",
+    }
     for k, v in (headers or {}).items():
+        base_headers[k] = v
+    req = urllib.request.Request(url, data=body, method=method)
+    for k, v in base_headers.items():
         req.add_header(k, v)
     return urllib.request.urlopen(req, timeout=timeout, context=ctx)
 
@@ -8395,14 +8409,44 @@ def _mig_name_sanitize(raw, taken, fallback_idx):
 
 
 def _xui_login(base, username, password):
+    # Новые 3x-ui (MHSanaei) требуют CSRF-токен + предварительную cookie: сначала GET
+    # страницы логина, достаём <meta name="csrf-token"> и Set-Cookie, потом POST с ними.
+    pre_cookies = []
+    csrf = ""
+    try:
+        page = _mig_http("GET", base + "/")
+        html = page.read().decode("utf-8", "replace")
+        for h, v in page.headers.items():
+            if h.lower() == "set-cookie":
+                pre_cookies.append(v.split(";")[0])
+        m = re.search(r'name=["\']csrf-token["\']\s+content=["\']([^"\']*)["\']', html)
+        if m:
+            csrf = m.group(1)
+    except Exception:
+        pass
+
     body = urllib.parse.urlencode({"username": username, "password": password}).encode()
-    resp = _mig_http("POST", base + "/login",
-                     {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}, body)
+    hdrs = {"Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": base + "/", "Origin": base}
+    if csrf:
+        hdrs["X-CSRF-TOKEN"] = csrf
+    if pre_cookies:
+        hdrs["Cookie"] = "; ".join(pre_cookies)
+    try:
+        resp = _mig_http("POST", base + "/login", hdrs, body)
+    except urllib.error.HTTPError as exc:
+        if exc.code == 403:
+            raise ValueError("Панель ответила 403 на /login. Проверь секретный путь в адресе "
+                             "(URL должен включать его целиком) — либо доступ ограничен фаерволом по IP.")
+        if exc.code == 404:
+            raise ValueError("По адресу нет /login (404). Проверь адрес и секретный путь 3x-ui.")
+        raise ValueError("Панель вернула HTTP %s на /login." % exc.code)
     raw = resp.read().decode("utf-8", "replace")
     try:
         parsed = json.loads(raw)
         if isinstance(parsed, dict) and parsed.get("success") is False:
-            raise ValueError("3x-ui отклонила логин/пароль: " + str(parsed.get("msg") or ""))
+            raise ValueError("3x-ui отклонила вход: " + str(parsed.get("msg") or "неверный логин/пароль"))
     except ValueError:
         raise
     except Exception:
@@ -8412,6 +8456,8 @@ def _xui_login(base, username, password):
         if h.lower() == "set-cookie":
             cookies.append(v.split(";")[0])
     if not cookies:
+        cookies = pre_cookies  # некоторые сборки не переустанавливают cookie после логина
+    if not cookies:
         raise ValueError("3x-ui не вернула cookie сессии — проверь логин/пароль и URL (включая секретный путь)")
     return "; ".join(cookies)
 
@@ -8419,10 +8465,19 @@ def _xui_login(base, username, password):
 def _xui_fetch(url, username, password):
     base = _mig_base(url)
     cookie = _xui_login(base, username, password)
-    resp = _mig_http("GET", base + "/panel/api/inbounds/list", {"Cookie": cookie, "Accept": "application/json"})
-    data = json.loads(resp.read().decode("utf-8", "replace"))
+    hdrs = {"Cookie": cookie, "Accept": "application/json, text/plain, */*", "Referer": base + "/"}
+    # список инбаундов в разных сборках 3x-ui — то GET, то POST; пробуем оба
+    data = None
+    for method in ("GET", "POST"):
+        try:
+            resp = _mig_http(method, base + "/panel/api/inbounds/list", hdrs, b"" if method == "POST" else None)
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            if isinstance(data, dict) and data.get("success"):
+                break
+        except Exception:
+            continue
     if not isinstance(data, dict) or not data.get("success"):
-        raise ValueError("3x-ui: не удалось получить инбаунды (" + str((data or {}).get("msg") or "нет success") + ")")
+        raise ValueError("3x-ui: не удалось получить инбаунды (" + str((data or {}).get("msg") or "нет доступа/список пуст") + ")")
     inbounds, clients = [], []
     for ib in (data.get("obj") or []):
         remark = str(ib.get("remark") or ("inbound-" + str(ib.get("id"))))
