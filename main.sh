@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.18-panel-hacker-50"
+SCRIPT_VERSION="2026.07.18-panel-hacker-51"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
 # (см. get_update_url) — иначе нода исполняла бы чужой скрипт.
@@ -7819,6 +7819,33 @@ def shopbot_running():
         return False
 
 
+_SHOPBOT_START_LOCK = _threading.Lock()  # HTTP-рестарт vs автостарт-таймер: без лока получались ДВА бота
+
+
+def shopbot_orphan_pids():
+    """Процессы бота, потерянные pid-файлом (после гонки старта или затёртого pid)."""
+    pids = []
+    tracked = shopbot_pid()
+    try:
+        entries = os.listdir("/proc")
+    except Exception:
+        return pids
+    for d in entries:
+        if not d.isdigit():
+            continue
+        pid = int(d)
+        if pid == tracked or pid == os.getpid():
+            continue
+        try:
+            with open("/proc/%s/cmdline" % d, "rb") as fh:
+                cmd = fh.read().replace(b"\0", b" ")
+        except Exception:
+            continue
+        if b"app.bot.main" in cmd:
+            pids.append(pid)
+    return pids
+
+
 def shopbot_sub_base():
     """База страницы подписки этой ноды: {base}/sub/<uuid> — то, что отдаёт нода."""
     dom = web_domain_active("sub")
@@ -7989,12 +8016,38 @@ def shopbot_stop():
         os.remove(SHOPBOT_PID_FILE)
     except Exception:
         pass
+    # добить сирот — иначе второй экземпляр держит getUpdates и бот "конфликтует сам с собой"
+    for opid in shopbot_orphan_pids():
+        for sig in (15, 9):
+            try:
+                os.kill(opid, sig)
+                time.sleep(0.3)
+            except Exception:
+                break
     return not shopbot_running()
 
 
 def shopbot_start(cfg=None):
+    with _SHOPBOT_START_LOCK:
+        return _shopbot_start_locked(cfg)
+
+
+def _shopbot_start_locked(cfg=None):
     cfg = cfg or load_shopbot_cfg()
     if shopbot_running():
+        return True, "уже запущен"
+    orphans = shopbot_orphan_pids()
+    if orphans:
+        # бот жив, просто pid-файл его потерял — усыновляем вместо второго запуска
+        with open(SHOPBOT_PID_FILE, "w") as f:
+            f.write(str(orphans[0]))
+        for extra in orphans[1:]:
+            for sig in (15, 9):
+                try:
+                    os.kill(extra, sig)
+                    time.sleep(0.3)
+                except Exception:
+                    break
         return True, "уже запущен"
     if not shopbot_installed():
         return False, "бот не установлен — нажми «Установить»"
