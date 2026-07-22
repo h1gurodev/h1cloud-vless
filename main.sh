@@ -4,8 +4,11 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.18-panel-hacker-48"
+SCRIPT_VERSION="2026.07.18-panel-hacker-49"
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
+# Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
+# (см. get_update_url) — иначе нода исполняла бы чужой скрипт.
+FORCED_UPDATE_URL="https://my.h1cloud.net/api/vless/panel-main.sh"
 
 # Central TLS router (router/). Every node auto-registers here on api/sub start
 # so clients get a trusted-https URL per node (https://ROUTER/<slug>/sub/UUID),
@@ -7390,6 +7393,9 @@ a.btn:hover{background:#63a4ff}
 </div></body></html>"""
 
 
+# Дублирует bash-константу: источник обновлений менять нельзя.
+FORCED_UPDATE_URL = "https://my.h1cloud.net/api/vless/panel-main.sh"
+
 SHOPBOT_LICENSE_FILE = os.path.join(SHOPBOT_BASE, "shopbot_license.json")
 SHOPBOT_DEV_TGID = 5179077308  # telegram id разработчика — только он включает модули
 SHOPBOT_LICENSE_KEYS = ("admin_panel", "webapp")
@@ -8493,7 +8499,8 @@ def status_payload(users):
             "note": "Use vpn stats for live Xray counters.",
         },
         "update": {
-            "url": read_first_line(UPDATE_URL_FILE),
+            "url": FORCED_UPDATE_URL,
+                "url_locked": True,
             "auto": enabled_from_file(AUTO_UPDATE_FILE),
         },
         "backups": list_backups()[:5],
@@ -11850,18 +11857,25 @@ function subNameModal() {
 
 function updateModal() {
   const up = (STATUS || {}).update || {};
-  const { wrap, refs } = fields([{ name: "url", label: "URL авто-обновления", value: up.url || "", ph: "https://.../main.sh" }]);
   const autoSel = el("select", {}, [el("option", { value: "on", text: "вкл" }), el("option", { value: "off", text: "выкл" })]);
   autoSel.value = up.auto ? "on" : "off";
   const btn = el("button", { class: "primary", text: "Сохранить", onclick: async () => {
-    const body = {};
-    const url = refs.url.value.trim(); if (url) body.url = url;
-    body.auto = autoSel.value;
     btn.disabled = true;
-    try { await api("/server/update-settings", { method: "POST", body }); closeModal(); toast("Настройки обновления сохранены"); setTimeout(refresh, 2500); }
+    try { await api("/server/update-settings", { method: "POST", body: { auto: autoSel.value } }); closeModal(); toast("Настройки обновления сохранены"); setTimeout(refresh, 2500); }
     catch (e) { toast(e.message, true); btn.disabled = false; }
   } });
-  modal({ title: "Обновления", body: [wrap, el("label", { class: "f", text: "авто-обновление" }, [autoSel])], footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn] });
+  modal({
+    title: "Обновления",
+    body: [
+      el("label", { class: "f", text: "источник обновлений" }, [
+        el("div", { class: "cmd" }, [el("code", { text: up.url || "—" })]),
+      ]),
+      el("p", { class: "mut", style: "margin:-4px 0 4px;font-size:11px",
+        text: "Источник зафиксирован провайдером и не может быть изменён." }),
+      el("label", { class: "f", text: "авто-обновление" }, [autoSel]),
+    ],
+    footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn],
+  });
 }
 
 /* ---------- inbounds (3x-ui style custom inbounds) ---------- */
@@ -13856,14 +13870,16 @@ class Handler(BaseHTTPRequestHandler):
         auto_value = first_value(data, "auto", "auto_update")
         changed = []
         if url_value != "":
-            if not re.match(r"^https?://", url_value):
-                self.send_json(400, {"ok": False, "error": "bad_update_url"})
-                return
-            atomic_text(UPDATE_URL_FILE, url_value + "\n")
-            atomic_text(AUTO_UPDATE_FILE, "1\n")
-            changed.append(f"url={url_value}")
-            changed.append("auto=1")
-        elif auto_value != "":
+            # Адрес обновлений зафиксирован — менять его нельзя (get_update_url
+            # всё равно берёт FORCED_UPDATE_URL, так что молча «сохранять» вредно).
+            log_action("api_update_url_denied", url_value[:120])
+            self.send_json(403, {
+                "ok": False,
+                "error": "update_url_locked",
+                "message": "Источник обновлений зафиксирован провайдером и не может быть изменён.",
+            })
+            return
+        if auto_value != "":
             auto_on = str(auto_value).lower() in ("1", "true", "yes", "on", "enable", "enabled")
             atomic_text(AUTO_UPDATE_FILE, "1\n" if auto_on else "0\n")
             changed.append(f"auto={'1' if auto_on else '0'}")
@@ -13874,7 +13890,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {
             "ok": True,
             "update": {
-                "url": read_first_line(UPDATE_URL_FILE),
+                "url": FORCED_UPDATE_URL,
+                "url_locked": True,
                 "auto": enabled_from_file(AUTO_UPDATE_FILE),
             },
         })
@@ -17186,17 +17203,11 @@ script_path() {
 }
 
 get_update_url() {
-    if [ -n "${UPDATE_URL:-}" ]; then
-        printf '%s\n' "$UPDATE_URL" | tr -d '\r' | head -n 1
-        return 0
-    fi
-
-    if [ -f "$UPDATE_URL_FILE" ] && [ -s "$UPDATE_URL_FILE" ]; then
-        head -n 1 "$UPDATE_URL_FILE" 2>/dev/null | tr -d '\r'
-        return 0
-    fi
-
-    echo "$DEFAULT_UPDATE_URL"
+    # Источник обновлений ЗАФИКСИРОВАН и не берётся ни из файла, ни из env.
+    # Причина: у владельца ноды есть файловый менеджер Pterodactyl, поэтому
+    # update_url.txt правится в обход панели — один клиент так подменил адрес
+    # на чужой репозиторий, и нода исполняла посторонний скрипт.
+    printf '%s\n' "$FORCED_UPDATE_URL"
 }
 
 auto_update_enabled() {
