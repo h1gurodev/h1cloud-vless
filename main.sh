@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.22-panel-hacker-52"
+SCRIPT_VERSION="2026.07.22-panel-hacker-53"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -7514,14 +7514,9 @@ def lock_text(key):
 
 
 def menu_rows(user, settings):
-    """Ряд кнопок платных модулей для главного меню бота."""
-    row = [InlineKeyboardButton(text="\\U0001F310 WebApp", callback_data="h1:webapp")]
-    try:
-        if user is not None and int(user.id) in set(settings.admin_ids):
-            row.append(InlineKeyboardButton(text="\\U0001F6E0 Админ-панель", callback_data="h1:admin"))
-    except Exception:
-        pass
-    return [row]
+    """Инлайн-кнопки в меню больше не добавляем — модули живут в реплай-клавиатуре
+    (см. h1_locks._h1_reply_kb). Функцию оставляем: её зовёт патч keyboards.py."""
+    return []
 '''
 
 H1_LOCKS_PY = '''from __future__ import annotations
@@ -7530,18 +7525,60 @@ import logging
 
 from aiogram import Bot, F, Router
 from aiogram.dispatcher.event.bases import SkipHandler
-from aiogram.filters import Command
+from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     MenuButtonDefault,
     MenuButtonWebApp,
     Message,
+    ReplyKeyboardMarkup,
     WebAppInfo,
 )
 
 from app.bot import h1_license as lic
+
+try:
+    from app.config import get_settings as _h1_get_settings
+except Exception:
+    _h1_get_settings = None
+
+BTN_ADMIN = "\\U0001F6E0 Админ-панель"
+BTN_WEBAPP = "\\U0001F310 WebApp"
+
+
+def _h1_admin_ids():
+    try:
+        return set(int(x) for x in _h1_get_settings().admin_ids)
+    except Exception:
+        return set()
+
+
+def _h1_reply_kb(user_id):
+    """Реплай-клавиатура у поля ввода: WebApp у всех, Админ-панель — только админам."""
+    url = lic.webapp_url()
+    if url.startswith("https://"):
+        wa = KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=url))
+    else:
+        wa = KeyboardButton(text=BTN_WEBAPP)  # без https Telegram не примет web_app — жмётся как текст
+    row = [wa]
+    if user_id in _h1_admin_ids():
+        row.append(KeyboardButton(text=BTN_ADMIN))
+    return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True, is_persistent=True)
+
+
+async def _h1_open_admin(message: Message, state: FSMContext = None) -> None:
+    """Открывает штатную админку СРАЗУ (без промежуточных сообщений)."""
+    from app.bot.handlers.admin import _PANEL_TEXT, _panel_kb
+    if state is not None:
+        try:
+            await state.clear()
+        except Exception:
+            pass
+    await message.answer(_PANEL_TEXT, reply_markup=_panel_kb())
 
 logger = logging.getLogger(__name__)
 router = Router(name="h1_locks")
@@ -7574,6 +7611,48 @@ async def _on_startup(bot: Bot) -> None:
     await apply_menu_button(bot)
 
 
+@router.message(CommandStart())
+async def _h1_start(message: Message) -> None:
+    # выдаём реплай-клавиатуру и пропускаем к штатному /start
+    try:
+        await message.answer("\\u2B07\\uFE0F Быстрое меню включено",
+                             reply_markup=_h1_reply_kb(int(message.from_user.id)))
+    except Exception:
+        pass
+    raise SkipHandler
+
+
+@router.message(F.text == BTN_ADMIN)
+async def _h1_kb_admin(message: Message, state: FSMContext) -> None:
+    if int(message.from_user.id) not in _h1_admin_ids():
+        raise SkipHandler
+    if not lic.is_licensed("admin_panel"):
+        await message.answer(lic.lock_text("admin_panel"), reply_markup=_back())
+        return
+    await _h1_open_admin(message, state)
+
+
+@router.message(F.text == BTN_WEBAPP)
+async def _h1_kb_webapp(message: Message) -> None:
+    if not lic.is_licensed("webapp"):
+        await message.answer(lic.lock_text("webapp"), reply_markup=_back())
+        return
+    url = lic.webapp_url()
+    if url.startswith("https://"):
+        await message.answer(
+            "\\U0001F310 <b>Веб-приложение</b>\\n\\nОткрой магазин прямо в Telegram:",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="\\U0001F680 Открыть", web_app=WebAppInfo(url=url))],
+            ]),
+        )
+    else:
+        await message.answer(
+            "\\U0001F310 <b>Веб-приложение</b>\\n\\nМодуль включён, но Telegram открывает приложения "
+            "только по <b>https</b>. Привяжите домен с SSL во вкладке «Домены» панели.",
+            reply_markup=_back(),
+        )
+
+
 def _back():
     return InlineKeyboardMarkup(
         inline_keyboard=[[InlineKeyboardButton(text="\\u2B05\\uFE0F В меню", callback_data="menu:main")]]
@@ -7597,17 +7676,12 @@ async def gate_admin_cb(cb: CallbackQuery) -> None:
 
 
 @router.callback_query(F.data == "h1:admin")
-async def open_admin(cb: CallbackQuery) -> None:
+async def open_admin(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     if not lic.is_licensed("admin_panel"):
         await cb.message.answer(lic.lock_text("admin_panel"), reply_markup=_back())
         return
-    await cb.message.answer(
-        "\\u2705 Админ-панель активирована.\\n\\nОткрыть: /admin",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[[InlineKeyboardButton(text="\\U0001F6E0 Открыть", callback_data="adm:menu")]]
-        ),
-    )
+    await _h1_open_admin(cb.message, state)
 
 
 # --- WebApp -------------------------------------------------------------------
@@ -8158,6 +8232,269 @@ try:
     _sb_threading.Timer(6.0, _shopbot_autostart).start()
 except Exception:
     pass
+
+
+# ---------------- Миграция с чужих панелей (3x-ui / Remnawave) ----------------
+# Владелец вводит адрес + доступы старой панели — переносим всех клиентов
+# (uuid сохраняется, значит выданные ссылки/подписки menyat не надо только хост).
+MIGRATE_STATE = {"running": False, "phase": "idle", "log": [], "done": 0, "total": 0,
+                 "imported": 0, "skipped": 0, "failed": 0, "result": None, "error": None, "source": None}
+_MIGRATE_LOCK = _threading.Lock()
+
+
+def _mig_log(msg, kind="info"):
+    MIGRATE_STATE.setdefault("log", []).append({"t": now_ts(), "kind": kind, "msg": str(msg)[:300]})
+    if len(MIGRATE_STATE["log"]) > 500:
+        MIGRATE_STATE["log"] = MIGRATE_STATE["log"][-400:]
+
+
+def _mig_http(method, url, headers=None, body=None, timeout=25):
+    import ssl as _ssl
+    ctx = _ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = _ssl.CERT_NONE  # чужие панели почти всегда на самоподписанных сертах
+    req = urllib.request.Request(url, data=body, method=method)
+    for k, v in (headers or {}).items():
+        req.add_header(k, v)
+    return urllib.request.urlopen(req, timeout=timeout, context=ctx)
+
+
+def _mig_base(url, default_scheme="http"):
+    base = str(url or "").strip().rstrip("/")
+    if base and not base.startswith(("http://", "https://")):
+        base = default_scheme + "://" + base
+    return base
+
+
+def _mig_name_sanitize(raw, taken, fallback_idx):
+    name = re.sub(r"[^A-Za-z0-9._-]", "-", str(raw or "").strip())[:32].strip("-.") or ("mig-user-%d" % fallback_idx)
+    base = name
+    n = 2
+    while name.lower() in taken:
+        name = "%s-%d" % (base[:28], n)
+        n += 1
+    taken.add(name.lower())
+    return name
+
+
+def _xui_login(base, username, password):
+    body = urllib.parse.urlencode({"username": username, "password": password}).encode()
+    resp = _mig_http("POST", base + "/login",
+                     {"Content-Type": "application/x-www-form-urlencoded", "Accept": "application/json"}, body)
+    raw = resp.read().decode("utf-8", "replace")
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict) and parsed.get("success") is False:
+            raise ValueError("3x-ui отклонила логин/пароль: " + str(parsed.get("msg") or ""))
+    except ValueError:
+        raise
+    except Exception:
+        pass
+    cookies = []
+    for h, v in resp.headers.items():
+        if h.lower() == "set-cookie":
+            cookies.append(v.split(";")[0])
+    if not cookies:
+        raise ValueError("3x-ui не вернула cookie сессии — проверь логин/пароль и URL (включая секретный путь)")
+    return "; ".join(cookies)
+
+
+def _xui_fetch(url, username, password):
+    base = _mig_base(url)
+    cookie = _xui_login(base, username, password)
+    resp = _mig_http("GET", base + "/panel/api/inbounds/list", {"Cookie": cookie, "Accept": "application/json"})
+    data = json.loads(resp.read().decode("utf-8", "replace"))
+    if not isinstance(data, dict) or not data.get("success"):
+        raise ValueError("3x-ui: не удалось получить инбаунды (" + str((data or {}).get("msg") or "нет success") + ")")
+    inbounds, clients = [], []
+    for ib in (data.get("obj") or []):
+        remark = str(ib.get("remark") or ("inbound-" + str(ib.get("id"))))
+        inbounds.append({"remark": remark, "port": ib.get("port"),
+                         "protocol": str(ib.get("protocol") or ""), "enabled": bool(ib.get("enable", True))})
+        try:
+            settings = json.loads(ib.get("settings") or "{}")
+        except Exception:
+            settings = {}
+        for c in (settings.get("clients") or []):
+            if not isinstance(c, dict):
+                continue
+            exp = c.get("expiryTime") or 0
+            try:
+                exp = int(exp)
+            except Exception:
+                exp = 0
+            if exp < 0:  # «N мс после первого подключения» — считаем срок от сегодня
+                exp = now_ts() * 1000 + abs(exp)
+            total = c.get("totalGB") or c.get("total") or 0
+            try:
+                total = int(total)
+            except Exception:
+                total = 0
+            clients.append({
+                "name": str(c.get("email") or "").strip(),
+                "uuid": str(c.get("id") or "").strip(),
+                "proto": str(ib.get("protocol") or ""), "inbound": remark,
+                "expires_ms": exp, "limit_bytes": total if total > 0 else 0,
+                "device_limit": parse_int(c.get("limitIp"), 0) or 0,
+                "enabled": bool(c.get("enable", True)),
+            })
+    return {"panel": "3x-ui", "inbounds": inbounds, "clients": clients}
+
+
+def _remna_fetch(url, token):
+    import datetime as _dt
+    base = _mig_base(url, "https")
+    headers = {"Authorization": "Bearer " + token, "Accept": "application/json"}
+    users, start, size = [], 0, 250
+    while True:
+        resp = _mig_http("GET", base + "/api/users?start=%d&size=%d" % (start, size), headers)
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+        payload = data.get("response") if isinstance(data, dict) and isinstance(data.get("response"), dict) else data
+        if isinstance(payload, dict):
+            chunk = payload.get("users")
+            total = payload.get("total")
+        else:
+            chunk, total = payload, None
+        if not isinstance(chunk, list):
+            chunk = []
+        users.extend(chunk)
+        if not chunk or total is None or len(users) >= parse_int(total, 0):
+            break
+        start += size
+    clients = []
+    for u in users:
+        if not isinstance(u, dict):
+            continue
+        exp = 0
+        expire_at = u.get("expireAt") or u.get("expire_at")
+        if expire_at:
+            try:
+                s = str(expire_at).replace("Z", "+00:00")
+                exp = int(_dt.datetime.fromisoformat(s).timestamp() * 1000)
+            except Exception:
+                exp = 0
+        clients.append({
+            "name": str(u.get("username") or "").strip(),
+            "uuid": str(u.get("vlessUuid") or u.get("uuid") or "").strip(),
+            "proto": "vless", "inbound": "",
+            "expires_ms": exp,
+            "limit_bytes": parse_int(u.get("trafficLimitBytes"), 0) or 0,
+            "device_limit": parse_int(u.get("hwidDeviceLimit"), 0) or 0,
+            "enabled": str(u.get("status") or "ACTIVE").upper() == "ACTIVE",
+        })
+    inbounds = []
+    try:
+        resp = _mig_http("GET", base + "/api/inbounds", headers)
+        data = json.loads(resp.read().decode("utf-8", "replace"))
+        payload = data.get("response") if isinstance(data, dict) and isinstance(data.get("response"), dict) else data
+        arr = payload.get("inbounds") if isinstance(payload, dict) else payload
+        for ib in (arr or []):
+            if isinstance(ib, dict):
+                inbounds.append({"remark": str(ib.get("tag") or ib.get("remark") or ""), "port": ib.get("port"),
+                                 "protocol": str(ib.get("type") or ib.get("protocol") or ""), "enabled": True})
+    except Exception:
+        pass
+    return {"panel": "remnawave", "inbounds": inbounds, "clients": clients}
+
+
+def _migrate_fetch(payload):
+    src = str(payload.get("source") or "").strip().lower()
+    url = str(payload.get("url") or "").strip()
+    if not url:
+        raise ValueError("не указан адрес панели-источника")
+    if src in ("xui", "3x-ui", "3xui", "x-ui"):
+        u = str(payload.get("username") or "").strip()
+        p = str(payload.get("password") or "")
+        if not u or not p:
+            raise ValueError("для 3x-ui нужны логин и пароль")
+        return _xui_fetch(url, u, p)
+    if src in ("remna", "remnawave"):
+        t = str(payload.get("token") or payload.get("api_key") or "").strip()
+        if not t:
+            raise ValueError("для Remnawave нужен API-токен")
+        return _remna_fetch(url, t)
+    raise ValueError("неизвестный источник: " + (src or "пусто"))
+
+
+def migrate_probe(payload):
+    data = _migrate_fetch(payload)
+    active = sum(1 for c in data["clients"] if c.get("enabled", True))
+    return {"ok": True, "panel": data["panel"], "clients": len(data["clients"]), "active": active,
+            "inbounds": [{"remark": i["remark"], "port": i["port"], "protocol": i["protocol"]}
+                         for i in data["inbounds"]][:20],
+            "inbounds_total": len(data["inbounds"]),
+            "sample": [c.get("name") or "?" for c in data["clients"]][:12]}
+
+
+def _migrate_worker(payload):
+    try:
+        MIGRATE_STATE.update({"phase": "fetch", "error": None})
+        _mig_log("Подключаюсь к " + str(payload.get("url") or "") + "…")
+        data = _migrate_fetch(payload)
+        clients = data["clients"]
+        MIGRATE_STATE.update({"phase": "import", "total": len(clients), "done": 0})
+        _mig_log("Источник: %s. Клиентов: %d, инбаундов: %d" % (data["panel"], len(clients), len(data["inbounds"])))
+        users = load_users()
+        existing_uuids = set(str(u.get("uuid")) for u in users)
+        taken = set(str(u.get("name", "")).lower() for u in users)
+        current = now_ts()
+        default_days = parse_int(payload.get("default_days"), 3650) or 3650
+        imported = skipped = failed = 0
+        for idx, c in enumerate(clients):
+            MIGRATE_STATE["done"] = idx + 1
+            label = c.get("name") or (str(c.get("uuid") or "?")[:8])
+            try:
+                cid = str(c.get("uuid") or "").strip()
+                try:
+                    cid = str(uuid.UUID(cid))
+                except Exception:
+                    cid = str(uuid.uuid4())  # trojan/ss без uuid — выдаём новый
+                if cid in existing_uuids:
+                    skipped += 1
+                    MIGRATE_STATE["skipped"] = skipped
+                    _mig_log("= %s — уже есть на этой ноде (uuid совпал), пропуск" % label, "skip")
+                    continue
+                exp_ms = int(c.get("expires_ms") or 0)
+                if exp_ms and exp_ms // 1000 <= current:
+                    skipped += 1
+                    MIGRATE_STATE["skipped"] = skipped
+                    _mig_log("~ %s — срок истёк ещё на старой панели, пропуск" % label, "skip")
+                    continue
+                name = _mig_name_sanitize(c.get("name"), taken, idx + 1)
+                rec = {"name": name, "uuid": cid, "created_at": current,
+                       "expires_at": (exp_ms // 1000) if exp_ms else current + default_days * 86400,
+                       "banned": (not c.get("enabled", True))}
+                lb = parse_int(c.get("limit_bytes"), 0) or 0
+                if lb > 0:
+                    rec["traffic_limit_bytes"] = lb
+                    rec["traffic_reset_pending"] = True
+                dl = parse_int(c.get("device_limit"), 0) or 0
+                if dl > 0:
+                    rec["device_limit"] = dl
+                users.append(rec)
+                existing_uuids.add(cid)
+                imported += 1
+                MIGRATE_STATE["imported"] = imported
+                _mig_log("+ %s -> перенесён" % name, "ok")
+            except Exception as exc:
+                failed += 1
+                MIGRATE_STATE["failed"] = failed
+                _mig_log("! %s — ошибка: %s" % (label, exc), "err")
+        MIGRATE_STATE["phase"] = "save"
+        _mig_log("Сохраняю клиентов и перезапускаю xray…")
+        save_users(users)
+        atomic_text(XRAY_RESTART_REQUEST_FILE, "migrate %d\n" % now_ts())
+        MIGRATE_STATE.update({"phase": "done", "result": {
+            "panel": data["panel"], "imported": imported, "skipped": skipped, "failed": failed,
+            "total": len(clients), "inbounds_seen": len(data["inbounds"])}})
+        _mig_log("Готово: перенесено %d, пропущено %d, ошибок %d" % (imported, skipped, failed), "ok")
+        log_action("migrate_done", "%s +%d ~%d !%d" % (data["panel"], imported, skipped, failed))
+    except Exception as exc:
+        MIGRATE_STATE.update({"phase": "error", "error": str(exc)})
+        _mig_log("Миграция прервана: %s" % exc, "err")
+        log_action("migrate_failed", str(exc))
+    finally:
+        MIGRATE_STATE["running"] = False
 
 
 # Curated dest/SNI targets known to serve TLS1.3 + H2 (good Reality camouflage).
@@ -9310,6 +9647,18 @@ nav a.act {
 .fednode .fn-url { font-size: 11px; color: var(--mut); display: block; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; }
 .fednode .fn-stat { font-size: 11px; color: var(--acc2); white-space: nowrap; }
 .led.off { background: #5a1f1f; box-shadow: 0 0 6px #b33; }
+/* --- миграция --- */
+.migbar { height: 10px; border-radius: 6px; background: rgba(255,255,255,.06); border: 1px solid var(--line); overflow: hidden; }
+.migbar-fill { height: 100%; background: linear-gradient(90deg, var(--acc), #6affb0); box-shadow: var(--glow); transition: width .4s ease; }
+.migstats { display: flex; gap: 12px; flex-wrap: wrap; }
+.migstat { flex: 1; min-width: 90px; border: 1px solid var(--line); border-radius: 10px; padding: 12px; text-align: center; background: rgba(255,255,255,.02); }
+.migstat-n { font-size: 26px; font-weight: 700; line-height: 1; }
+.migstat-l { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim); margin-top: 6px; }
+.migstat.ok .migstat-n { color: var(--acc); text-shadow: var(--glow); }
+.migstat.warn .migstat-n { color: var(--amber); }
+.migstat.err .migstat-n { color: #ff6b6b; }
+.miglog { max-height: 260px; overflow-y: auto; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; line-height: 1.55; background: rgba(0,0,0,.28); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.migline { white-space: pre-wrap; word-break: break-word; }
 .fedrow { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 12.5px; }
 .fedrow:last-child { border-bottom: 0; }
 .fedrow .fr-name { flex: 1; min-width: 0; font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
@@ -9451,6 +9800,7 @@ nav a.act {
     <g id="i-up"><path d="M12 20V9.5M7.5 13.5L12 9l4.5 4.5M5 4h14"/></g>
     <g id="i-bot"><rect x="4" y="8" width="16" height="11" rx="2.5"/><path d="M12 4.5V8M8.5 13h.01M15.5 13h.01M9.5 16h5"/><circle cx="12" cy="3.6" r="1.1"/></g>
     <g id="i-lock"><rect x="5" y="10.5" width="14" height="9.5" rx="1.8"/><path d="M8.2 10.5V7.8a3.8 3.8 0 0 1 7.6 0v2.7"/></g>
+    <g id="i-mig"><path d="M3 8h11M10 4l4 4-4 4M21 16H10M14 12l-4 4 4 4"/></g>
   </defs>
 </svg>
 
@@ -10509,6 +10859,7 @@ const NAV = [
   { id: "domains", label: "Домены", icon: "i-net" },
   { id: "federation", label: "Серверы", icon: "i-fed" },
   { id: "shopbot", label: "Бот", icon: "i-bot" },
+  { id: "migrate", label: "Миграция", icon: "i-mig" },
   { id: "backups", label: "Бэкапы", icon: "i-box" },
   { id: "logs", label: "Логи", icon: "i-term" },
 ];
@@ -10551,7 +10902,7 @@ function render() {
   p.innerHTML = "";
   if (FED_NODE) p.append(fedBanner());
   ({ dash: viewDash, clients: viewClients, inbounds: viewInbounds, transport: viewTransport, settings: viewSettings,
-     domains: viewDomains, federation: viewFederation, shopbot: viewShopBot, backups: viewBackups, logs: viewLogs }[state.view] || viewDash)(p);
+     domains: viewDomains, federation: viewFederation, shopbot: viewShopBot, migrate: viewMigrate, backups: viewBackups, logs: viewLogs }[state.view] || viewDash)(p);
 }
 
 function tile(k, v, unit, sub, mod, icon) {
@@ -12530,6 +12881,163 @@ function fedBanner() {
   ]);
 }
 
+/* ---------------- миграция с чужих панелей (3x-ui / Remnawave) ---------------- */
+let MIG_TIMER = null;
+let MIG_FORM = { source: "xui", url: "", username: "", password: "", token: "" };
+
+function migSourceCard() {
+  const card = el("div", { class: "card" });
+  card.append(el("h3", { text: "Откуда переносим" }));
+  const tabs = el("div", { class: "segtabs", style: "display:flex;gap:8px;margin:10px 0 16px" });
+  const bodyWrap = el("div", {});
+  const sources = [
+    { id: "xui", label: "3x-ui" },
+    { id: "remna", label: "Remnawave" },
+  ];
+  function paintTabs() {
+    tabs.innerHTML = "";
+    for (const s of sources) {
+      tabs.append(el("button", {
+        class: MIG_FORM.source === s.id ? "primary" : "ghost",
+        text: s.label, onclick: () => { MIG_FORM.source = s.id; paintTabs(); paintBody(); },
+      }));
+    }
+  }
+  function paintBody() {
+    bodyWrap.innerHTML = "";
+    const rows = [
+      { name: "url", label: MIG_FORM.source === "xui" ? "Адрес панели 3x-ui (с секретным путём, если есть)" : "Адрес Remnawave",
+        ph: MIG_FORM.source === "xui" ? "http://1.2.3.4:2053/secretpath" : "https://panel.example.com", value: MIG_FORM.url },
+    ];
+    if (MIG_FORM.source === "xui") {
+      rows.push({ name: "username", label: "Логин", ph: "admin", value: MIG_FORM.username });
+      rows.push({ name: "password", label: "Пароль", type: "password", ph: "••••••••", value: MIG_FORM.password });
+    } else {
+      rows.push({ name: "token", label: "API-токен (Bearer)", ph: "eyJhbGciOi…", value: MIG_FORM.token });
+    }
+    const { wrap, refs } = fields(rows);
+    for (const k of Object.keys(refs)) refs[k].addEventListener("input", () => { MIG_FORM[k] = refs[k].value.trim(); });
+    bodyWrap.append(wrap);
+    const btns = el("div", { style: "display:flex;gap:10px;margin-top:16px;flex-wrap:wrap" }, [
+      el("button", { class: "ghost", html: svg("i-refresh") + "Проверить связь", onclick: (e) => migProbe(e.target) }),
+      el("button", { class: "primary", html: svg("i-mig") + "Начать перенос", onclick: (e) => migStart(e.target) }),
+    ]);
+    bodyWrap.append(btns);
+    bodyWrap.append(el("p", { class: "mut", style: "margin-top:12px;font-size:12px",
+      text: "UUID клиентов сохраняется — их старые ссылки и подписки продолжат работать, поменяется только хост. Уже существующие на этой ноде (по UUID) и просроченные пропускаются." }));
+  }
+  paintTabs(); paintBody();
+  card.append(tabs, bodyWrap);
+  return card;
+}
+
+async function migProbe(btn) {
+  if (!MIG_FORM.url) { toast("Укажи адрес панели", true); return; }
+  if (btn) { btn.disabled = true; }
+  try {
+    const r = await api("/migrate/probe", { method: "POST", body: MIG_FORM });
+    modal({
+      title: "Связь есть · " + (r.panel || MIG_FORM.source),
+      body: [
+        el("p", { text: "Нашёл клиентов: " + r.clients + " (активных " + r.active + "), инбаундов: " + (r.inbounds_total ?? "?") }),
+        r.sample && r.sample.length ? el("p", { class: "mut", style: "font-size:12px;margin-top:8px", text: "Например: " + r.sample.join(", ") }) : null,
+      ].filter(Boolean),
+      footer: [el("button", { class: "primary", text: "Ок", onclick: closeModal })],
+    });
+  } catch (e) {
+    toast("Не подключиться: " + e.message, true);
+  } finally { if (btn) btn.disabled = false; }
+}
+
+async function migStart(btn) {
+  if (!MIG_FORM.url) { toast("Укажи адрес панели", true); return; }
+  if (btn) btn.disabled = true;
+  try {
+    await api("/migrate/start", { method: "POST", body: MIG_FORM });
+    toast("Миграция запущена");
+    migPoll(true);
+  } catch (e) {
+    toast(e.message, true);
+    if (btn) btn.disabled = false;
+  }
+}
+
+function migPhaseLabel(ph) {
+  return ({ idle: "ожидание", fetch: "подключение", import: "перенос клиентов", save: "сохранение", done: "готово", error: "ошибка" })[ph] || ph;
+}
+
+function migRenderStatus(box, m) {
+  box.innerHTML = "";
+  const running = !!m.running, ph = m.phase || "idle";
+  const head = el("div", { style: "display:flex;align-items:center;gap:10px;margin-bottom:12px" }, [
+    el("span", { class: "led" + (ph === "done" ? " on" : ph === "error" ? " off" : running ? " warn" : "") }),
+    el("h3", { style: "margin:0;flex:1", text: "Статус: " + migPhaseLabel(ph) }),
+    running ? el("span", { class: "pill warn", text: "идёт…" }) : null,
+  ].filter(Boolean));
+  box.append(head);
+
+  if (m.total > 0 || running) {
+    const pct = m.total ? Math.round((m.done / m.total) * 100) : (running ? 5 : 0);
+    box.append(el("div", { class: "migbar" }, [el("div", { class: "migbar-fill", style: "width:" + pct + "%" })]));
+    box.append(el("div", { class: "mut", style: "font-size:12px;margin:6px 0 14px", text: m.done + " / " + m.total + " клиентов" }));
+  }
+
+  const stat = el("div", { class: "migstats" }, [
+    migStat("перенесено", m.imported || 0, "ok"),
+    migStat("пропущено", m.skipped || 0, "warn"),
+    migStat("ошибок", m.failed || 0, "err"),
+  ]);
+  box.append(stat);
+
+  if (m.error) box.append(el("p", { class: "lockmsg", style: "color:#ff6b6b;margin-top:12px", text: m.error }));
+
+  const log = el("div", { class: "miglog" });
+  for (const e of (m.log || [])) {
+    const c = e.kind === "ok" ? "#37d67a" : e.kind === "err" ? "#ff6b6b" : e.kind === "skip" ? "#e0a458" : "#8aa0b3";
+    log.append(el("div", { class: "migline", style: "color:" + c }, [el("span", { text: e.msg })]));
+  }
+  box.append(el("h4", { text: "Журнал", style: "margin:18px 0 8px" }));
+  box.append(log);
+  log.scrollTop = log.scrollHeight;
+}
+
+function migStat(label, val, kind) {
+  return el("div", { class: "migstat " + kind }, [
+    el("div", { class: "migstat-n", text: String(val) }),
+    el("div", { class: "migstat-l", text: label }),
+  ]);
+}
+
+async function migPoll(force) {
+  const box = $("migStatusBox");
+  if (!box) { if (MIG_TIMER) { clearInterval(MIG_TIMER); MIG_TIMER = null; } return; }
+  try {
+    const r = await api("/migrate/status");
+    const m = r.migrate || {};
+    migRenderStatus(box, m);
+    if (!m.running && (m.phase === "done" || m.phase === "error" || m.phase === "idle")) {
+      if (MIG_TIMER) { clearInterval(MIG_TIMER); MIG_TIMER = null; }
+      if (m.phase === "done") { toast("Миграция завершена: +" + (m.imported || 0)); refresh(); }
+    } else if (!MIG_TIMER) {
+      MIG_TIMER = setInterval(() => migPoll(false), 1200);
+    }
+  } catch (e) { /* тихо, панель могла перезапускаться */ }
+}
+
+async function viewMigrate(p) {
+  if (MIG_TIMER) { clearInterval(MIG_TIMER); MIG_TIMER = null; }
+  p.append(el("div", { class: "vhead" }, [
+    el("div", {}, [
+      el("h2", { text: "Миграция" }),
+      el("p", { class: "mut", text: "Переезд со старой панели в один клик: укажи доступы к 3x-ui или Remnawave — все клиенты, лимиты и сроки переедут на эту ноду. UUID сохраняется, старые ссылки продолжат работать." }),
+    ]),
+  ]));
+  p.append(migSourceCard());
+  const statusCard = el("div", { class: "card" }, [el("div", { id: "migStatusBox" }, [el("div", { class: "empty", text: "Заполни доступы и нажми «Начать перенос»." })])]);
+  p.append(statusCard);
+  migPoll(false);
+}
+
 /* ---------- backups ---------- */
 function viewBackups(p) {
   const list = (STATUS && STATUS.backups) || [];
@@ -13130,6 +13638,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if parts and parts[0] in ("shopbot", "shop"):
             self.handle_shopbot(method, parts, data)
+            return
+
+        if parts and parts[0] in ("migrate", "migration"):
+            self.handle_migrate(method, parts, data)
             return
 
         if parts and parts[0] in ("webdomains", "domains-web"):
@@ -13780,6 +14292,34 @@ class Handler(BaseHTTPRequestHandler):
         atomic_text(SUB_RESTART_REQUEST_FILE, f"api_domain {now_ts()}\n")
         log_action("api_domain", raw)
         self.send_json(200, {"ok": True, "domain": raw, "restart": "requested"})
+
+    def handle_migrate(self, method, parts, data):
+        sub = parts[1] if len(parts) > 1 else ""
+        if method == "GET" and sub in ("", "status"):
+            st = dict(MIGRATE_STATE)
+            st["log"] = list(st.get("log") or [])[-120:]
+            self.send_json(200, {"ok": True, "migrate": st})
+            return
+        if method == "POST" and sub == "probe":
+            try:
+                self.send_json(200, migrate_probe(data))
+            except Exception as exc:
+                self.send_json(502, {"ok": False, "error": str(exc)})
+            return
+        if method == "POST" and sub in ("start", "run"):
+            with _MIGRATE_LOCK:
+                if MIGRATE_STATE.get("running"):
+                    self.send_json(409, {"ok": False, "error": "миграция уже идёт"})
+                    return
+                MIGRATE_STATE.clear()
+                MIGRATE_STATE.update({"running": True, "phase": "fetch", "log": [], "done": 0, "total": 0,
+                                      "imported": 0, "skipped": 0, "failed": 0, "result": None, "error": None,
+                                      "source": str(data.get("source") or "")})
+            log_action("migrate_start", str(data.get("source") or "") + " " + str(data.get("url") or ""))
+            _threading.Thread(target=_migrate_worker, args=(dict(data),), daemon=True).start()
+            self.send_json(202, {"ok": True, "message": "миграция запущена"})
+            return
+        self.send_json(404, {"ok": False, "error": "migrate_route_not_found"})
 
     def handle_shopbot(self, method, parts, data):
         sub = parts[1] if len(parts) > 1 else ""
