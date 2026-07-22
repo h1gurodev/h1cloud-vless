@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.22-panel-hacker-53"
+SCRIPT_VERSION="2026.07.22-panel-hacker-54"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -7546,8 +7546,51 @@ try:
 except Exception:
     _h1_get_settings = None
 
-BTN_ADMIN = "\\U0001F6E0 Админ-панель"
+from aiogram import Dispatcher
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import ReplyKeyboardRemove, Update
+
+# --- вся навигация вынесена в реплай-клавиатуру у поля ввода; инлайн-меню убрано ---
+BTN_BUY = "\\U0001F6D2 Купить VPN"
+BTN_PROFILE = "\\U0001F464 Мой VPN"
+BTN_TOPUP = "\\U0001F4B3 Пополнить"
+BTN_PROMO = "\\U0001F381 Промокод"
+BTN_REF = "\\U0001F465 Партнёрка"
+BTN_HELP = "\\U0001F198 Помощь"
+BTN_TRIAL = "\\U0001F680 Попробовать бесплатно"
 BTN_WEBAPP = "\\U0001F310 WebApp"
+BTN_ADMIN = "\\U0001F6E0 Админ-панель"
+
+# текст кнопки -> callback штатного бота, в который переотправляем нажатие
+_H1_MENU_MAP = {
+    BTN_BUY: "menu:buy",
+    BTN_PROFILE: "menu:profile",
+    BTN_TOPUP: "menu:topup",
+    BTN_PROMO: "menu:promo",
+    BTN_REF: "menu:ref",
+    BTN_HELP: "menu:help",
+    BTN_TRIAL: "menu:trial",
+}
+
+_H1_DP = None            # диспетчер (ловим на старте) — нужен для переотправки нажатий
+_H1_UPD = {"n": 2000000000}
+
+# Синтетический callback (от нажатия реплай-кнопки) имеет несуществующий id — его
+# answer() у Telegram падает. Гасим ровно эту ошибку, чтобы не откатывалась транзакция.
+_h1_orig_answer = CallbackQuery.answer
+
+
+async def _h1_safe_answer(self, *args, **kwargs):
+    try:
+        return await _h1_orig_answer(self, *args, **kwargs)
+    except TelegramBadRequest as exc:
+        s = str(exc).lower()
+        if "query is too old" in s or "query id is invalid" in s or "query_id_invalid" in s:
+            return None
+        raise
+
+
+CallbackQuery.answer = _h1_safe_answer
 
 
 def _h1_admin_ids():
@@ -7557,17 +7600,39 @@ def _h1_admin_ids():
         return set()
 
 
-def _h1_reply_kb(user_id):
-    """Реплай-клавиатура у поля ввода: WebApp у всех, Админ-панель — только админам."""
+def _h1_reply_kb(user=None):
+    """Постоянная клавиатура у поля ввода со ВСЕМИ разделами бота."""
+    uid = 0
+    trial_used = False
+    try:
+        uid = int(getattr(user, "id", 0) or 0)
+        trial_used = bool(getattr(user, "trial_used", False))
+    except Exception:
+        pass
+    trial_on = False
+    try:
+        trial_on = bool(_h1_get_settings().trial.enabled)
+    except Exception:
+        trial_on = False
+
+    rows = [
+        [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_PROFILE)],
+        [KeyboardButton(text=BTN_TOPUP), KeyboardButton(text=BTN_PROMO)],
+        [KeyboardButton(text=BTN_REF), KeyboardButton(text=BTN_HELP)],
+    ]
+    if trial_on and not trial_used:
+        rows.append([KeyboardButton(text=BTN_TRIAL)])
+
     url = lic.webapp_url()
+    last = []
     if url.startswith("https://"):
-        wa = KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=url))
+        last.append(KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=url)))
     else:
-        wa = KeyboardButton(text=BTN_WEBAPP)  # без https Telegram не примет web_app — жмётся как текст
-    row = [wa]
-    if user_id in _h1_admin_ids():
-        row.append(KeyboardButton(text=BTN_ADMIN))
-    return ReplyKeyboardMarkup(keyboard=[row], resize_keyboard=True, is_persistent=True)
+        last.append(KeyboardButton(text=BTN_WEBAPP))  # без https web_app нельзя — жмётся как текст
+    if uid in _h1_admin_ids():
+        last.append(KeyboardButton(text=BTN_ADMIN))
+    rows.append(last)
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
 async def _h1_open_admin(message: Message, state: FSMContext = None) -> None:
@@ -7579,6 +7644,13 @@ async def _h1_open_admin(message: Message, state: FSMContext = None) -> None:
         except Exception:
             pass
     await message.answer(_PANEL_TEXT, reply_markup=_panel_kb())
+
+
+def _back():
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[InlineKeyboardButton(text="\\u2B05\\uFE0F В меню", callback_data="menu:main")]]
+    )
+
 
 logger = logging.getLogger(__name__)
 router = Router(name="h1_locks")
@@ -7607,19 +7679,45 @@ async def apply_menu_button(bot: Bot) -> bool:
 
 
 @router.startup()
-async def _on_startup(bot: Bot) -> None:
+async def _on_startup(bot: Bot, **kw) -> None:
+    global _H1_DP
+    _H1_DP = kw.get("dispatcher")
     await apply_menu_button(bot)
 
 
-@router.message(CommandStart())
-async def _h1_start(message: Message) -> None:
-    # выдаём реплай-клавиатуру и пропускаем к штатному /start
+async def _h1_redispatch(message: Message, bot: Bot, data_str: str) -> bool:
+    """Переотправляет нажатие реплай-кнопки в штатный callback-обработчик бота.
+    Прогоняем синтетический Update через диспетчер — отрабатывают все middleware
+    (session/user), поэтому штатные экраны (покупка, профиль…) работают как есть."""
+    if _H1_DP is None:
+        return False
     try:
-        await message.answer("\\u2B07\\uFE0F Быстрое меню включено",
-                             reply_markup=_h1_reply_kb(int(message.from_user.id)))
+        sent = await message.answer("\\u2026")  # плейсхолдер: штатный хендлер его отредактирует
+        _H1_UPD["n"] += 1
+        cb = CallbackQuery(
+            id="h1-" + str(_H1_UPD["n"]),
+            from_user=message.from_user,
+            chat_instance="h1-" + str(message.chat.id),
+            message=sent,
+            data=data_str,
+        )
+        await _H1_DP.feed_update(bot, Update(update_id=_H1_UPD["n"], callback_query=cb))
+        return True
+    except Exception as exc:
+        logger.warning("H1: переотправка %s не удалась: %s", data_str, exc)
+        return False
+
+
+@router.message(CommandStart())
+async def _h1_start(message: Message, user=None) -> None:
+    # Полностью берём /start на себя: приветствие + постоянная клавиатура,
+    # штатное инлайн-меню больше не показываем.
+    try:
+        from app.bot.handlers.start import _greeting
+        text = _greeting(user) if user is not None else "\\U0001F44B Меню открыто ниже."
     except Exception:
-        pass
-    raise SkipHandler
+        text = "\\U0001F44B Меню открыто ниже."
+    await message.answer(text, reply_markup=_h1_reply_kb(user))
 
 
 @router.message(F.text == BTN_ADMIN)
@@ -7627,7 +7725,7 @@ async def _h1_kb_admin(message: Message, state: FSMContext) -> None:
     if int(message.from_user.id) not in _h1_admin_ids():
         raise SkipHandler
     if not lic.is_licensed("admin_panel"):
-        await message.answer(lic.lock_text("admin_panel"), reply_markup=_back())
+        await message.answer(lic.lock_text("admin_panel"))
         return
     await _h1_open_admin(message, state)
 
@@ -7635,7 +7733,7 @@ async def _h1_kb_admin(message: Message, state: FSMContext) -> None:
 @router.message(F.text == BTN_WEBAPP)
 async def _h1_kb_webapp(message: Message) -> None:
     if not lic.is_licensed("webapp"):
-        await message.answer(lic.lock_text("webapp"), reply_markup=_back())
+        await message.answer(lic.lock_text("webapp"))
         return
     url = lic.webapp_url()
     if url.startswith("https://"):
@@ -7648,15 +7746,34 @@ async def _h1_kb_webapp(message: Message) -> None:
     else:
         await message.answer(
             "\\U0001F310 <b>Веб-приложение</b>\\n\\nМодуль включён, но Telegram открывает приложения "
-            "только по <b>https</b>. Привяжите домен с SSL во вкладке «Домены» панели.",
-            reply_markup=_back(),
+            "только по <b>https</b>. Привяжите домен с SSL во вкладке «Домены» панели."
         )
 
 
-def _back():
-    return InlineKeyboardMarkup(
-        inline_keyboard=[[InlineKeyboardButton(text="\\u2B05\\uFE0F В меню", callback_data="menu:main")]]
-    )
+@router.message(F.text.in_(set(_H1_MENU_MAP.keys())))
+async def _h1_kb_menu(message: Message, bot: Bot) -> None:
+    data_str = _H1_MENU_MAP.get(message.text or "")
+    if not data_str:
+        raise SkipHandler
+    ok = await _h1_redispatch(message, bot, data_str)
+    if not ok:
+        raise SkipHandler  # диспетчер не пойман — отдаём событие штатным хендлерам
+
+
+@router.callback_query(F.data == "menu:main")
+async def _h1_menu_main(cb: CallbackQuery, user=None) -> None:
+    # Инлайн «в меню» больше не показываем: правим текст, навигация — снизу на клавиатуре.
+    try:
+        from app.bot.handlers.start import _menu_text
+        text = _menu_text(user) if user is not None else "\\U0001F447 Меню — на клавиатуре снизу."
+    except Exception:
+        text = "\\U0001F447 Меню — на клавиатуре снизу."
+    if isinstance(cb.message, Message):
+        try:
+            await cb.message.edit_text(text)
+        except Exception:
+            pass
+    await cb.answer()
 
 
 # --- Админ-панель: перехватываем вход, пока модуль не оплачен -----------------
