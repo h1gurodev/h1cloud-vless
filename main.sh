@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.22-panel-hacker-55"
+SCRIPT_VERSION="2026.07.22-panel-hacker-56"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -7623,12 +7623,10 @@ def _h1_reply_kb(user=None):
     if trial_on and not trial_used:
         rows.append([KeyboardButton(text=BTN_TRIAL)])
 
-    url = lic.webapp_url()
-    last = []
-    if url.startswith("https://"):
-        last.append(KeyboardButton(text=BTN_WEBAPP, web_app=WebAppInfo(url=url)))
-    else:
-        last.append(KeyboardButton(text=BTN_WEBAPP))  # без https web_app нельзя — жмётся как текст
+    # WebApp — ПЛАЙН-кнопка (без web_app=), чтобы нажатие всегда шло в бота и
+    # лицензия проверялась ЖИВОЙ: иначе Telegram кэширует web_app-ссылку у клиента
+    # и после /h1lock модуль «работает» до перезапуска приложения.
+    last = [KeyboardButton(text=BTN_WEBAPP)]
     if uid in _h1_admin_ids():
         last.append(KeyboardButton(text=BTN_ADMIN))
     rows.append(last)
@@ -7657,8 +7655,16 @@ router = Router(name="h1_locks")
 
 
 async def apply_menu_button(bot: Bot) -> bool:
-    """Синяя кнопка Menu слева от поля ввода. Ставим её ВСЕГДА (если есть https):
-    страница /webapp сама решает — показать магазин или экран «заблокировано»."""
+    """Синяя кнопка Menu слева от поля ввода. Ставим ТОЛЬКО когда webapp куплен —
+    иначе убираем (MenuButtonDefault), чтобы после /h1lock не осталось кэшированного
+    входа в мини-апп в обход лицензии."""
+    if not lic.is_licensed("webapp"):
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+            logger.info("H1: кнопка Menu убрана (webapp не куплен)")
+        except Exception as exc:
+            logger.warning("H1: не удалось убрать кнопку Menu: %s", exc)
+        return False
     url = lic.webapp_url()
     if not url.startswith("https://"):
         logger.warning(
