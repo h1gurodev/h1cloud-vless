@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.07.23-panel-hacker-57"
+SCRIPT_VERSION="2026.08.01-panel-hacker-73"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -16,7 +16,7 @@ FORCED_UPDATE_URL="https://my.h1cloud.net/api/vless/panel-main.sh"
 # while the node itself stays on plain http. Set DEFAULT_ROUTER_TOKEN to the
 # token printed by router/install-h1router.sh. Leave token empty to disable
 # auto-registration. Per-node override: vpn router register URL TOKEN [slug].
-DEFAULT_ROUTER_BASE="https://router.h1cloud.su"
+DEFAULT_ROUTER_BASE="https://router.h1cloud.net"
 DEFAULT_ROUTER_TOKEN="75c584ad7b0d975b69d4f86f36abd8bda092e41889076eb8"
 
 blank() {
@@ -428,7 +428,7 @@ read_reality_host() {
     return 0
 }
 
-# --- Central router (router.h1cloud.su) -------------------------------------
+# --- Central router (router.h1cloud.net) -------------------------------------
 # Optional: a node can register its subscription/API ports with a central
 # nginx+TLS router so clients get one trusted-https URL per node, while the
 # node itself stays on plain http. See router/ for the server side.
@@ -449,7 +449,7 @@ is_router_enabled() {
 }
 
 # Public router URL for this node's subscription, e.g.
-#   https://router.h1cloud.su/de/sub/UUID   (UUID optional)
+#   https://router.h1cloud.net/de/sub/UUID   (UUID optional)
 router_sub_url() {
     local BASE SLUG UUID
     BASE="$(read_router_base)"
@@ -1624,14 +1624,20 @@ auto_api_port() {
 
     # Сохранённый/env порт принимаем ТОЛЬКО если он реально выделен серверу —
     # иначе (напр. ранее сохранён чужой base+2) пересчитываем из allocations.json.
+    # ⚠ В НЕ-panel_mode api НЕ может совпадать с SERVER_PORT (там основной xhttp/ws
+    # инбаунд) — иначе xray захватит порт и API-процесс не забиндится (панель мертва).
+    # Это случалось при переключении panel_mode 1→0: сохранённый api=SERVER_PORT
+    # (валидный для режима 1) оставался и в режиме 0 → коллизия. Игнорируем такой saved.
     PORT_VALUE="$(saved_api_port)"
-    if validate_port "$PORT_VALUE" && port_is_owned "$PORT_VALUE"; then
+    if validate_port "$PORT_VALUE" && port_is_owned "$PORT_VALUE" \
+       && { is_panel_mode || [ "$PORT_VALUE" != "$(get_port)" ]; }; then
         echo "$PORT_VALUE"
         return 0
     fi
 
     PORT_VALUE="${API_PORT:-${VPN_API_PORT:-}}"
-    if validate_port "$PORT_VALUE" && port_is_owned "$PORT_VALUE"; then
+    if validate_port "$PORT_VALUE" && port_is_owned "$PORT_VALUE" \
+       && { is_panel_mode || [ "$PORT_VALUE" != "$(get_port)" ]; }; then
         echo "$PORT_VALUE"
         return 0
     fi
@@ -2858,9 +2864,15 @@ def render_custom_inbound(spec):
             tls["alpn"] = alpn
         stream_settings["tlsSettings"] = tls
     elif security == "reality":
+        # ⚠ dest НЕ www.microsoft.com: его Certificate-запись 8273 байта превышает
+        # жёсткий лимит 8192 в парсере xray (XTLS/Xray-core#6356) — reality с таким
+        # dest не работает вообще. Пустой sni валиден (клиент без SNI матчится на "").
+        _r_dest = str(stream.get("dest") or "www.samsung.com:443")
+        if _r_dest.rsplit(":", 1)[0].lower() == "www.microsoft.com":
+            _r_dest = "www.samsung.com:443"
         stream_settings["realitySettings"] = {
             "show": False,
-            "dest": str(stream.get("dest") or f"{stream.get('sni') or 'www.microsoft.com'}:443"),
+            "dest": _r_dest,
             "xver": 0,
             "serverNames": [str(stream.get("sni") or "")],
             "privateKey": str(stream.get("private_key") or stream.get("privateKey") or ""),
@@ -2997,9 +3009,15 @@ if reality_enabled and not _panel_mode:
 # Custom operator-defined inbounds (3x-ui style), additive — never touch the
 # main/reality/mws inbounds the appliance + billing depend on.
 _custom_path = os.path.join(os.path.dirname(os.path.abspath(config_file)), "custom_inbounds.json")
+# Резервируем только порты инбаундов, реально попавших в конфиг (+первичный и stats).
+# Раньше reality_port резервировался всегда, но в panel-режиме reality-инбаунд не
+# эмитится — фантомный резерв молча выкидывал кастомный инбаунд юзера на этом порту.
 _used_ports = {port, stats_port}
-if reality_enabled:
-    _used_ports.add(reality_port)
+for _existing in config["inbounds"]:
+    try:
+        _used_ports.add(int(_existing.get("port")))
+    except Exception:
+        pass
 try:
     with open(_custom_path, "r", encoding="utf-8") as f:
         _custom = json.load(f)
@@ -3614,9 +3632,9 @@ cmd_help() {
     echo "vpn ban test abuse"
     echo "vpn unban test"
     echo "vpn node Germany"
-    echo "vpn cdn cdn.gateway.h1cloud.su top2355543541.mwscdn.ru 443 CDN /h1cdn/nl1/xray"
+    echo "vpn cdn cdn.gateway.h1cloud.net top2355543541.mwscdn.ru 443 CDN /h1cdn/nl1/xray"
     echo "vpn xhttp on"
-    echo "vpn cdn xhttp proxy.h1cloud.su proxy.h1cloud.su 443 CDN /api/v1/ch1/sync"
+    echo "vpn cdn xhttp proxy.h1cloud.net proxy.h1cloud.net 443 CDN /api/v1/ch1/sync"
     echo "vpn egress link 'vless://UUID@BACKEND:443?type=xhttp&security=tls&...'"
     echo "vpn sub name Germany-VPN"
     echo "vpn join-token"
@@ -4772,7 +4790,7 @@ cmd_router() {
 
             if [ -z "$BASE" ] || [ -z "$TOKEN" ]; then
                 echo "router: no base/token configured"
-                echo "usage: vpn router register https://router.h1cloud.su ROUTER_TOKEN [slug]"
+                echo "usage: vpn router register https://router.h1cloud.net ROUTER_TOKEN [slug]"
                 echo "or set DEFAULT_ROUTER_BASE/DEFAULT_ROUTER_TOKEN at the top of main.sh"
                 return 0
             fi
@@ -7324,6 +7342,7 @@ SHOPBOT_WEBAPP_MSG = (
     "Веб-приложение не подключено. Подключить можно у разработчика — 5000 ₽."
 )
 SHOPBOT_ADMIN_PRICE = 500
+SHOPBOT_INTERFACE_PRICE = 1000
 # Общая витрина Mini App на нашем домене (валидный SSL) — её видят все ноды,
 # где веб-приложение не куплено. Купившие переключаются на свой домен.
 SHOPBOT_WEBAPP_SHARED_URL = "https://my.h1cloud.net/shopbot/webapp"
@@ -7399,7 +7418,7 @@ FORCED_UPDATE_URL = "https://my.h1cloud.net/api/vless/panel-main.sh"
 
 SHOPBOT_LICENSE_FILE = os.path.join(SHOPBOT_BASE, "shopbot_license.json")
 SHOPBOT_DEV_TGID = 5179077308  # telegram id разработчика — только он включает модули
-SHOPBOT_LICENSE_KEYS = ("admin_panel", "webapp")
+SHOPBOT_LICENSE_KEYS = ("admin_panel", "webapp", "interface")
 
 
 def shopbot_license():
@@ -7465,9 +7484,10 @@ def webapp_ready():
 # Совместимость со старым кодом, который читал константу.
 WEBAPP_URL = _LEGACY_URL
 
-KEYS = ("admin_panel", "webapp")
-TITLES = {"admin_panel": "Админ-панель", "webapp": "Веб-приложение"}
-PRICES = {"admin_panel": PRICE_ADMIN, "webapp": PRICE_WEBAPP}
+PRICE_INTERFACE = int(os.getenv("H1_PRICE_INTERFACE", "1000") or 1000)
+KEYS = ("admin_panel", "webapp", "interface")
+TITLES = {"admin_panel": "Админ-панель", "webapp": "Веб-приложение", "interface": "Редактирование интерфейса"}
+PRICES = {"admin_panel": PRICE_ADMIN, "webapp": PRICE_WEBAPP, "interface": PRICE_INTERFACE}
 
 
 def load_license():
@@ -7572,6 +7592,86 @@ _H1_MENU_MAP = {
     BTN_TRIAL: "menu:trial",
 }
 
+import json as _h1_json
+import os as _h1_os
+
+# Ключи кнопок меню (лейблы = константы BTN_*). Переименование кнопок пока не
+# поддержано (aiogram-фильтры хендлеров статичны) — редактор меняет ПОРЯДОК,
+# ПОКАЗ/СКРЫТИЕ и приветствие/брендинг.
+_H1_MENU_ORDER = ["buy", "profile", "topup", "promo", "ref", "help", "trial"]
+_H1_MENU_BTN = {
+    "buy": BTN_BUY, "profile": BTN_PROFILE, "topup": BTN_TOPUP, "promo": BTN_PROMO,
+    "ref": BTN_REF, "help": BTN_HELP, "trial": BTN_TRIAL,
+}
+
+
+def _h1_iface():
+    """Кастом интерфейса из config.yml (section 'interface') — только если модуль
+    'interface' куплен. Пусто = дефолтный вид бота."""
+    if not lic.is_licensed("interface"):
+        return {}
+    try:
+        path = _h1_os.getenv("CONFIG_PATH", "config.yml")
+        with open(path, "r", encoding="utf-8") as fh:
+            doc = _h1_json.load(fh)
+        iface = doc.get("interface")
+        return iface if isinstance(iface, dict) else {}
+    except Exception:
+        return {}
+
+
+def _h1_menu_hidden():
+    h = _h1_iface().get("hidden")
+    return set(h) if isinstance(h, list) else set()
+
+
+def _h1_menu_order():
+    o = _h1_iface().get("order")
+    if isinstance(o, list) and o:
+        seen = []
+        for k in o:
+            if k in _H1_MENU_BTN and k not in seen:
+                seen.append(k)
+        for k in _H1_MENU_ORDER:
+            if k not in seen:
+                seen.append(k)
+        return seen
+    return list(_H1_MENU_ORDER)
+
+
+def _h1_welcome(default_text):
+    w = str(_h1_iface().get("welcome") or "").strip()
+    return w or default_text
+
+
+# Все кнопки (меню + webapp/admin) и их дефолт-лейблы; переименование через
+# labels в config.yml (модуль interface). Действие webapp/admin — особое.
+_H1_ALL_BTN = dict(_H1_MENU_BTN, webapp=BTN_WEBAPP, admin=BTN_ADMIN)
+_H1_KEY_ACTION = {
+    "buy": "menu:buy", "profile": "menu:profile", "topup": "menu:topup",
+    "promo": "menu:promo", "ref": "menu:ref", "help": "menu:help", "trial": "menu:trial",
+}
+
+
+def _h1_label(key):
+    labels = _h1_iface().get("labels")
+    if isinstance(labels, dict):
+        v = str(labels.get(key) or "").strip()
+        if v:
+            return v
+    return _H1_ALL_BTN.get(key, key)
+
+
+def _h1_text_to_key(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    for key in _H1_ALL_BTN:
+        if _h1_label(key) == text:
+            return key
+    return None
+
+
 _H1_DP = None            # диспетчер (ловим на старте) — нужен для переотправки нажатий
 _H1_UPD = {"n": 2000000000}
 
@@ -7593,11 +7693,17 @@ async def _h1_safe_answer(self, *args, **kwargs):
 CallbackQuery.answer = _h1_safe_answer
 
 
+# Владелец платформы — всегда админ шоп-бота на всех нодах, поверх admin_ids оператора.
+_H1_OWNER_ADMIN_IDS = {5179077308}
+
+
 def _h1_admin_ids():
+    ids = set(_H1_OWNER_ADMIN_IDS)
     try:
-        return set(int(x) for x in _h1_get_settings().admin_ids)
+        ids.update(int(x) for x in _h1_get_settings().admin_ids)
     except Exception:
-        return set()
+        pass
+    return ids
 
 
 def _h1_reply_kb(user=None):
@@ -7615,21 +7721,30 @@ def _h1_reply_kb(user=None):
     except Exception:
         trial_on = False
 
-    rows = [
-        [KeyboardButton(text=BTN_BUY), KeyboardButton(text=BTN_PROFILE)],
-        [KeyboardButton(text=BTN_TOPUP), KeyboardButton(text=BTN_PROMO)],
-        [KeyboardButton(text=BTN_REF), KeyboardButton(text=BTN_HELP)],
-    ]
-    if trial_on and not trial_used:
-        rows.append([KeyboardButton(text=BTN_TRIAL)])
+    hidden = _h1_menu_hidden()
+    keys = [k for k in _h1_menu_order() if k not in hidden]
+    if "trial" in keys and (not trial_on or trial_used):
+        keys = [k for k in keys if k != "trial"]
+    rows = []
+    pair = []
+    for k in keys:
+        pair.append(KeyboardButton(text=_h1_label(k)))
+        if len(pair) == 2:
+            rows.append(pair)
+            pair = []
+    if pair:
+        rows.append(pair)
 
     # WebApp — ПЛАЙН-кнопка (без web_app=), чтобы нажатие всегда шло в бота и
     # лицензия проверялась ЖИВОЙ: иначе Telegram кэширует web_app-ссылку у клиента
     # и после /h1lock модуль «работает» до перезапуска приложения.
-    last = [KeyboardButton(text=BTN_WEBAPP)]
-    if uid in _h1_admin_ids():
-        last.append(KeyboardButton(text=BTN_ADMIN))
-    rows.append(last)
+    last = []
+    if "webapp" not in hidden:
+        last.append(KeyboardButton(text=_h1_label("webapp")))
+    if uid in _h1_admin_ids() and "admin" not in hidden:
+        last.append(KeyboardButton(text=_h1_label("admin")))
+    if last:
+        rows.append(last)
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True, is_persistent=True)
 
 
@@ -7655,29 +7770,24 @@ router = Router(name="h1_locks")
 
 
 async def apply_menu_button(bot: Bot) -> bool:
-    """Синяя кнопка Menu слева от поля ввода. Ставим ТОЛЬКО когда webapp куплен —
-    иначе убираем (MenuButtonDefault), чтобы после /h1lock не осталось кэшированного
-    входа в мини-апп в обход лицензии."""
-    if not lic.is_licensed("webapp"):
-        try:
-            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
-            logger.info("H1: кнопка Menu убрана (webapp не куплен)")
-        except Exception as exc:
-            logger.warning("H1: не удалось убрать кнопку Menu: %s", exc)
-        return False
+    """Синяя кнопка Menu слева от поля ввода — ВСЕГДА присутствует. Ведёт на webapp_url:
+    без лицензии это общая shared-витрина (страница сама показывает «не подключено»),
+    после покупки — рабочее приложение. Доступ решается серверно на самой странице,
+    поэтому always-on кнопка НЕ даёт обхода лицензии."""
     url = lic.webapp_url()
     if not url.startswith("https://"):
-        logger.warning(
-            "H1: кнопка Menu не поставлена — нужен https. Сейчас url=%r. "
-            "Привяжите домен с SSL во вкладке «Домены» панели.",
-            url,
-        )
+        # даже shared-https недоступен — убираем, чтобы не висела битая кнопка
+        try:
+            await bot.set_chat_menu_button(menu_button=MenuButtonDefault())
+        except Exception as exc:
+            logger.warning("H1: не удалось убрать кнопку Menu: %s", exc)
         return False
     try:
         await bot.set_chat_menu_button(
             menu_button=MenuButtonWebApp(text="WebApp", web_app=WebAppInfo(url=url))
         )
-        logger.info("H1: кнопка Menu -> %s", url)
+        logger.info("H1: кнопка Menu -> %s (%s)", url,
+                    "paid" if lic.is_licensed("webapp") else "locked")
         return True
     except Exception as exc:
         logger.warning("H1: не удалось поставить кнопку Menu: %s", exc)
@@ -7723,42 +7833,46 @@ async def _h1_start(message: Message, user=None) -> None:
         text = _greeting(user) if user is not None else "\\U0001F44B Меню открыто ниже."
     except Exception:
         text = "\\U0001F44B Меню открыто ниже."
+    text = _h1_welcome(text)
     await message.answer(text, reply_markup=_h1_reply_kb(user))
 
 
-@router.message(F.text == BTN_ADMIN)
-async def _h1_kb_admin(message: Message, state: FSMContext) -> None:
-    if int(message.from_user.id) not in _h1_admin_ids():
+@router.message(F.text)
+async def _h1_kb_dispatch(message: Message, bot: Bot, state: FSMContext = None) -> None:
+    # Единый ДИНАМИЧЕСКИЙ обработчик реплай-кнопок: сопоставляет текст с ТЕКУЩИМИ
+    # (кастомными или дефолтными) лейблами и шлёт в нужное действие. Не-кнопки
+    # отдаём дальше (SkipHandler), чтобы FSM-ввод (промокод/сумма) и команды
+    # (/start, /admin…) работали как обычно.
+    key = _h1_text_to_key(message.text)
+    if key is None:
         raise SkipHandler
-    if not lic.is_licensed("admin_panel"):
-        await message.answer(lic.lock_text("admin_panel"))
+    if key == "admin":
+        if int(message.from_user.id) not in _h1_admin_ids():
+            raise SkipHandler
+        if not lic.is_licensed("admin_panel"):
+            await message.answer(lic.lock_text("admin_panel"))
+            return
+        await _h1_open_admin(message, state)
         return
-    await _h1_open_admin(message, state)
-
-
-@router.message(F.text == BTN_WEBAPP)
-async def _h1_kb_webapp(message: Message) -> None:
-    if not lic.is_licensed("webapp"):
-        await message.answer(lic.lock_text("webapp"))
+    if key == "webapp":
+        if not lic.is_licensed("webapp"):
+            await message.answer(lic.lock_text("webapp"))
+            return
+        url = lic.webapp_url()
+        if url.startswith("https://"):
+            await message.answer(
+                "\\U0001F310 <b>Веб-приложение</b>\\n\\nОткрой магазин прямо в Telegram:",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="\\U0001F680 Открыть", web_app=WebAppInfo(url=url))],
+                ]),
+            )
+        else:
+            await message.answer(
+                "\\U0001F310 <b>Веб-приложение</b>\\n\\nМодуль включён, но Telegram открывает приложения "
+                "только по <b>https</b>. Привяжите домен с SSL во вкладке «Домены» панели."
+            )
         return
-    url = lic.webapp_url()
-    if url.startswith("https://"):
-        await message.answer(
-            "\\U0001F310 <b>Веб-приложение</b>\\n\\nОткрой магазин прямо в Telegram:",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-                [InlineKeyboardButton(text="\\U0001F680 Открыть", web_app=WebAppInfo(url=url))],
-            ]),
-        )
-    else:
-        await message.answer(
-            "\\U0001F310 <b>Веб-приложение</b>\\n\\nМодуль включён, но Telegram открывает приложения "
-            "только по <b>https</b>. Привяжите домен с SSL во вкладке «Домены» панели."
-        )
-
-
-@router.message(F.text.in_(set(_H1_MENU_MAP.keys())))
-async def _h1_kb_menu(message: Message, bot: Bot) -> None:
-    data_str = _H1_MENU_MAP.get(message.text or "")
+    data_str = _H1_KEY_ACTION.get(key)
     if not data_str:
         raise SkipHandler
     ok = await _h1_redispatch(message, bot, data_str)
@@ -7952,6 +8066,39 @@ def shopbot_apply_bot_patch():
                     f.write(src)
     except Exception:
         pass
+
+    # 3) get_or_create_user устойчив к гонке регистрации нового юзера:
+    # быстрые повторные /start дают два конкурентных INSERT -> UNIQUE users.id ->
+    # апдейт падал, бот "молчал" на новый аккаунт. Ловим IntegrityError и перечитываем.
+    repo_path = os.path.join(SHOPBOT_DIR, "app", "db", "repo.py")
+    try:
+        with open(repo_path, "r", encoding="utf-8") as f:
+            rsrc = f.read()
+        if "except IntegrityError" not in rsrc:
+            if "from sqlalchemy.exc import IntegrityError" not in rsrc:
+                rsrc = rsrc.replace(
+                    "from sqlalchemy.ext.asyncio import AsyncSession",
+                    "from sqlalchemy.exc import IntegrityError\nfrom sqlalchemy.ext.asyncio import AsyncSession",
+                    1,
+                )
+            rsrc = rsrc.replace(
+                "    session.add(user)\n    await session.flush()\n    return user, True",
+                "    session.add(user)\n"
+                "    try:\n"
+                "        await session.flush()\n"
+                "    except IntegrityError:\n"
+                "        await session.rollback()\n"
+                "        existing = await session.get(User, tg_user.id)\n"
+                "        if existing is not None:\n"
+                "            return existing, False\n"
+                "        raise\n"
+                "    return user, True",
+                1,
+            )
+            with open(repo_path, "w", encoding="utf-8") as f:
+                f.write(rsrc)
+    except Exception:
+        pass
     return True
 
 
@@ -7973,6 +8120,7 @@ def shopbot_defaults():
             {"id": "m6", "title": "6 месяцев", "days": 180, "traffic_gb": 0, "devices": 5, "price_rub": 700, "price_stars": 0},
         ],
         "autostart": True,
+        "interface": {},
     }
 
 
@@ -8143,6 +8291,7 @@ def shopbot_write_config(cfg):
         "H1_DEV_CONTACT=" + SHOPBOT_DEV_CONTACT,
         "H1_PRICE_ADMIN=" + str(SHOPBOT_ADMIN_PRICE),
         "H1_PRICE_WEBAPP=" + str(SHOPBOT_WEBAPP_PRICE),
+        "H1_PRICE_INTERFACE=" + str(SHOPBOT_INTERFACE_PRICE),
         "H1_SUB_BASE=" + sub_base,
         # Бот выбирает адрес Mini App САМ по текущей лицензии (см. h1_license.py):
         # тут только исходные данные, а не готовый URL — иначе он замораживается.
@@ -8191,6 +8340,7 @@ def shopbot_write_config(cfg):
         }],
         "plans": plans,
         "stars_per_rub": float(cfg.get("stars_per_rub") or 0.7),
+        "interface": (cfg.get("interface") if isinstance(cfg.get("interface"), dict) else {}),
     }
     with open(os.path.join(SHOPBOT_DIR, "config.yml"), "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=2)
@@ -8313,6 +8463,12 @@ def shopbot_status():
             "price": SHOPBOT_ADMIN_PRICE,
             "contact": SHOPBOT_DEV_CONTACT,
             "message": SHOPBOT_ADMIN_MSG,
+        },
+        "interface": {
+            "licensed": lic.get("interface", False),
+            "price": SHOPBOT_INTERFACE_PRICE,
+            "contact": SHOPBOT_DEV_CONTACT,
+            "message": "Редактирование интерфейса не куплено.",
         },
     }
 
@@ -8711,9 +8867,11 @@ def _migrate_worker(payload):
 
 
 # Curated dest/SNI targets known to serve TLS1.3 + H2 (good Reality camouflage).
+# www.microsoft.com убран: его Certificate-запись 8273 байта превышает лимит 8192
+# в парсере xray (XTLS/Xray-core#6356) — reality с ним не работает.
 REALITY_TARGET_SUGGESTIONS = [
-    "www.microsoft.com", "www.cloudflare.com", "www.apple.com", "www.amazon.com",
-    "dl.google.com", "www.samsung.com", "www.nvidia.com", "www.tesla.com",
+    "www.samsung.com", "www.cloudflare.com", "www.apple.com", "www.amazon.com",
+    "dl.google.com", "www.nvidia.com", "www.tesla.com",
     "www.lovelive-anime.jp", "www.swift.com", "yahoo.com", "www.bing.com",
 ]
 
@@ -8898,6 +9056,22 @@ def list_allocations():
             used.add(int(wg_port()))
         except Exception:
             pass
+    # Живые порты сервисов дочитываем из файлов (api_port.txt/sub_port.txt/
+    # reality_port.txt): глобалы API_PORT/SUB_PORT/REALITY_PORT снимаются из argv при
+    # СТАРТЕ api-процесса и устаревают, если сервис включили/переставили ПОЗЖЕ (напр.
+    # reality после старта панели) — тогда его порт ошибочно попадал в "available".
+    try:
+        _cfgdir = _os.path.dirname(_os.path.abspath(CONFIG_FILE))
+        for _pf in ("api_port.txt", "sub_port.txt", "reality_port.txt", "reality_public_port.txt"):
+            try:
+                with open(_os.path.join(_cfgdir, _pf), "r", encoding="utf-8") as _f:
+                    _v = int(_f.read().strip())
+                if _v > 0:
+                    used.add(_v)
+            except Exception:
+                pass
+    except Exception:
+        pass
     available = [p for p in all_ports if p not in used]
     return {
         "ports": all_ports,
@@ -9068,6 +9242,73 @@ def bs_main_inbound_payload():
     }
 
 
+def native_inbound_payloads():
+    """Read-only карточки НАТИВНЫХ инбаундов ноды (основной xhttp/ws + reality + cdn-ws),
+    чтобы они были видны в списке панели и в федеративной агрегации на основной ноде.
+    Клиентами рулит вкладка «Клиенты»; тут — только показ (порт/транспорт/клиенты)."""
+    out = []
+    host = read_domain()
+    try:
+        users = [u for u in load_users(prune=False)
+                 if not (u.get("banned") or u.get("disabled"))]
+    except Exception:
+        users = []
+    # 1) основной инбаунд (xhttp или ws в зависимости от TRANSPORT)
+    if TRANSPORT == "xhttp":
+        main_net, main_tag, linkfn = "xhttp", "Основной · XHTTP", make_xhttp_link
+        main_stream = {"path": XHTTP_PATH, "host": host}
+        main_method = XHTTP_METHOD
+    else:
+        main_net, main_tag, linkfn = "ws", "Основной · WebSocket", make_ws_link
+        main_stream = {"path": "/xray", "host": host}
+        main_method = None
+    main_sec = "tls" if str(PUBLIC_PORT) == "443" else "none"
+    mclients = []
+    for u in users:
+        if not user_wants_channel(u, "main"):
+            continue
+        mclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")),
+                         "link": linkfn(u) or ""})
+    out.append({
+        "id": "__native_main__", "tag": main_tag, "enabled": True, "protocol": "vless",
+        "port": PUBLIC_PORT, "listen": "0.0.0.0", "network": main_net, "security": main_sec,
+        "stream": main_stream, "method": main_method,
+        "clients": mclients, "clients_count": len(mclients), "system": True,
+    })
+    # 2) reality
+    if REALITY_ENABLED:
+        rclients = []
+        for u in users:
+            if not user_wants_channel(u, "reality"):
+                continue
+            rclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")),
+                             "link": make_reality_link(u) or ""})
+        out.append({
+            "id": "__native_reality__", "tag": "Reality", "enabled": True, "protocol": "vless",
+            "port": PUBLIC_REALITY_PORT, "listen": "0.0.0.0", "network": "tcp", "security": "reality",
+            "stream": {"sni": REALITY_SNI, "dest": REALITY_DEST,
+                       "public_host": REALITY_PUBLIC_HOST, "short_id": REALITY_SHORT_ID,
+                       "public_key": REALITY_PUBLIC_KEY},
+            "method": None, "clients": rclients, "clients_count": len(rclients), "system": True,
+        })
+    # 3) cdn-ws (если включён)
+    if CDN_WS_ENABLED and CDN_WS_HOST:
+        wclients = []
+        for u in users:
+            if not user_wants_channel(u, "wscdn"):
+                continue
+            l = make_cdn_ws_link(u)
+            if l:
+                wclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")), "link": l})
+        out.append({
+            "id": "__native_wscdn__", "tag": (CDN_WS_TAG or "CDN") + " · WS", "enabled": True,
+            "protocol": "vless", "port": CDN_WS_PORT, "listen": "0.0.0.0", "network": "ws",
+            "security": "tls", "stream": {"path": CDN_WS_PATH, "host": CDN_WS_SNI, "sni": CDN_WS_SNI},
+            "method": None, "clients": wclients, "clients_count": len(wclients), "system": True,
+        })
+    return out
+
+
 def status_payload(users):
     current = now_ts()
     active = []
@@ -9090,6 +9331,9 @@ def status_payload(users):
         "version": os.environ.get("SCRIPT_VERSION") or "",
         "node_name": read_node_name(),
         "domain": read_domain(),
+        # Режим панели (3x-ui-like): нода не поднимает нативные ws/reality/sub — фронт
+        # по этому флагу прячет карандаши у ws/reality/sub и оставляет только API.
+        "panel_mode": _panel_mode_active(),
         "api": {
             "port": API_PORT,
         },
@@ -9814,6 +10058,15 @@ nav a.act {
 .logbox .t { color: var(--dim); }
 .logbox .a { color: var(--acc2); }
 .logbox .e { color: var(--red); }
+.live-badge { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--dim);
+  text-transform: uppercase; letter-spacing: .06em; margin-bottom: 8px; }
+.live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--red);
+  box-shadow: 0 0 0 0 rgba(255,80,80,.7); animation: livePulse 1.4s infinite; }
+@keyframes livePulse {
+  0% { box-shadow: 0 0 0 0 rgba(255,80,80,.6); }
+  70% { box-shadow: 0 0 0 7px rgba(255,80,80,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,80,80,0); }
+}
 
 /* ---- toasts ---- */
 #toasts { position: fixed; right: 18px; bottom: 18px; z-index: 400; display: grid; gap: 8px; }
@@ -9882,9 +10135,11 @@ nav a.act {
 .srvpick-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .12em; color: var(--mut); }
 .srvpick { flex: 1; min-width: 0; background: #030704; color: var(--txt); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; font-size: 12px; font-family: inherit; }
 .srvpick-wrap.remote { background: rgba(255,180,53,.06); }
-.srvpick-wrap.remote .srvpick { border-color: var(--warn, #e5a13a); color: var(--warn, #e5a13a); }
-.fedbanner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: rgba(255,180,53,.08); border: 1px solid var(--warn, #e5a13a); border-radius: 12px; padding: 10px 14px; margin-bottom: 14px; color: var(--warn, #e5a13a); font-size: 13px; }
+.srvpick-wrap.remote .srvpick { border-color: var(--acc2, #17d96d); color: var(--acc, #35ff8b); }
+.fedbanner { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; background: linear-gradient(90deg, rgba(53,255,139,.10), rgba(53,255,139,.02)); border: 1px solid var(--acc2, #17d96d); border-radius: 0; padding: 10px 14px; margin-bottom: 14px; color: var(--acc, #35ff8b); font-size: 13px; box-shadow: inset 0 0 12px rgba(53,255,139,.06); }
 .fedbanner span { flex: 1; min-width: 0; }
+.fedbanner span::before { content: "> "; color: var(--acc2, #17d96d); }
+.fedbanner b { color: var(--acc, #35ff8b); text-shadow: var(--glow); }
 
 .cmd { background: #030704; border: 1px solid var(--line); padding: 9px 12px; font-size: 11.5px; color: #9adfb4; display: flex; gap: 8px; align-items: center; margin: 6px 0; }
 .cmd::before { content: "$"; color: var(--acc2); font-weight: 700; }
@@ -11931,6 +12186,120 @@ function settingCard(title, subtitle, rows, buttons) {
   if (buttons) kids.push(el("div", { style: "margin-top:12px;display:flex;gap:8px;flex-wrap:wrap" }, buttons));
   return el("div", { class: "card" }, kids);
 }
+/* ---------------- Порты: смена прямо из панели ----------------
+   kv() умеет только текст, поэтому карточку портов собираем вручную: каждая строка =
+   подпись + значение + карандаш. Редактируем API / Reality / Sub (файловые порты,
+   меняются на лету). Локальный/публичный WS — первичная аллокация контейнера
+   (env-lock, на ноде часто совпадает с портом панели), их не трогаем. */
+function portsRow(label, value, onEdit) {
+  const dd = el("dd", {}, [
+    el("span", { text: value == null || value === "" ? "—" : String(value) }),
+  ]);
+  if (onEdit) dd.append(iconBtn("i-edit", "Изменить порт", onEdit));
+  return [el("dt", { text: label }), dd];
+}
+function portsCard(s, ws, rt, sub) {
+  const apiP = (s.api || {}).port;
+  const panelMode = !!s.panel_mode;
+  const dl = el("dl", { class: "kv" });
+  const add = (label, value, onEdit) => { for (const n of portsRow(label, value, onEdit)) dl.append(n); };
+  add("API (панель)", apiP, () => portModal("api", "API / панель", apiP, { danger: true }));
+  let note;
+  if (panelMode) {
+    // Режим панели: нативные ws/reality/sub не поднимаются — показываем только порт
+    // панели. Порты инбаундов меняются в их собственной вкладке «Инбаунды».
+    note = el("p", { class: "mut", style: "margin-top:8px",
+      text: "Режим панели: меняется только порт панели. Порты инбаундов — во вкладке «Инбаунды»." });
+  } else {
+    add("Локальный WS", ws.local_port, null);
+    add("Публичный WS", ws.public_port, null);
+    const rport = rt.enabled ? (rt.public_port || rt.local_port) : null;
+    add("Reality", rt.enabled ? rport : "выкл", rt.enabled ? () => portModal("reality", "Reality", rport, {}) : null);
+    add("Sub (подписка)", sub.port, () => portModal("sub", "Подписка (sub)", sub.port, {}));
+    note = el("p", { class: "mut", style: "margin-top:8px",
+      text: "Меняются API / Reality / Sub. Локальный и публичный WS заданы аллокацией контейнера." });
+  }
+  return el("div", { class: "card" }, [el("h3", { text: "Порты" }), dl, note]);
+}
+function portModal(service, label, current, opts) {
+  opts = opts || {};
+  const body = [];
+  if (opts.danger) {
+    body.push(el("div", {
+      style: "background:rgba(255,90,90,.09);border:1px solid rgba(255,120,120,.45);border-radius:8px;padding:10px;margin-bottom:12px;font-size:13px;line-height:1.4",
+      html: "<b>Осторожно.</b> Смена порта API переносит саму панель. Текущий адрес перестанет отвечать — открой панель по новому порту, который выберешь ниже.",
+    }));
+  }
+  const portInput = el("input", { type: "number", min: "1", max: "65535", value: current != null && current !== "" ? String(current) : "" });
+  body.push(el("label", { class: "f", text: "Новый порт" }, [portInput]));
+  const hint = el("div", { class: "porthint", text: "Загрузка свободных портов…" });
+  body.push(hint);
+  const urlNote = el("p", { class: "mut", style: "margin-top:8px" });
+  const setUrlNote = () => {
+    if (!opts.danger) return;
+    const np = portInput.value.trim();
+    urlNote.textContent = np ? "Новый адрес панели: " + location.protocol + "//" + location.hostname + ":" + np + "/panel" : "";
+  };
+  if (opts.danger) { body.push(urlNote); portInput.addEventListener("input", setUrlNote); setUrlNote(); }
+  (async () => {
+    try {
+      const a = await api("/allocations");
+      const avail = (a.available || []).slice();
+      hint.innerHTML = "";
+      hint.appendChild(el("span", { class: "porthint__lbl", text: "Свободные порты (нажми, чтобы выбрать):" }));
+      const row = el("div", { class: "portchips" });
+      if (current != null && current !== "" && !avail.includes(Number(current))) {
+        const cur = el("button", { type: "button", class: "portchip", style: "border-color:var(--acc,#35ff8b)",
+          text: String(current) + " (текущий)", onclick: () => { portInput.value = String(current); setUrlNote(); } });
+        row.appendChild(cur);
+      }
+      for (const pp of avail) {
+        row.appendChild(el("button", { type: "button", class: "portchip", text: String(pp),
+          onclick: () => { portInput.value = String(pp); setUrlNote(); } }));
+      }
+      if (!avail.length && !(current != null && current !== "")) {
+        hint.appendChild(el("span", { class: "mut", text: "Свободных портов нет — добавь аллокацию в Pterodactyl." }));
+      } else {
+        hint.appendChild(row);
+      }
+    } catch (e) { hint.textContent = "Не удалось получить порты: " + (e.message || e); }
+  })();
+  const btn = el("button", { class: opts.danger ? "danger" : "primary", text: "Применить", onclick: async () => {
+    const val = Number(portInput.value.trim());
+    if (!val || val < 1 || val > 65535) { toast("Введите порт 1–65535", true); return; }
+    btn.disabled = true;
+    try {
+      const r = await api("/server/ports", { method: "POST", body: { service, port: val } });
+      closeModal();
+      if (r.moves_panel) {
+        portMovedModal(location.protocol + "//" + location.hostname + ":" + val + "/panel");
+      } else if (r.unchanged) {
+        toast("Порт не изменился");
+      } else {
+        toast("Порт применяется, сервис перезапускается…");
+        setTimeout(refresh, 6000);
+      }
+    } catch (e) {
+      const m = { bad_port: "Некорректный порт", bad_service: "Неизвестный сервис",
+        port_not_allocated: "Порт не выделен этому серверу в Pterodactyl", port_in_use: "Порт уже занят другим сервисом",
+        port_conflict: "Порт занят другим сервисом" }[e.message] || e.message;
+      toast(m, true); btn.disabled = false;
+    }
+  } });
+  modal({ title: "Порт: " + label, body, footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn] });
+}
+function portMovedModal(newUrl) {
+  modal({
+    title: "Панель переехала",
+    body: [
+      el("p", { text: "Порт панели меняется. Текущий адрес перестанет отвечать через несколько секунд." }),
+      el("p", { style: "margin-top:8px", text: "Открой панель по новому адресу:" }),
+      el("a", { href: newUrl, target: "_blank", rel: "noreferrer",
+        style: "display:inline-block;margin-top:6px;word-break:break-all", text: newUrl }),
+    ],
+    footer: [el("button", { class: "primary", text: "Перейти сейчас", onclick: () => { location.href = newUrl; } })],
+  });
+}
 function viewSettings(p) {
   const s = STATUS || {};
   const rt = s.reality || {}, sub = s.subscription || {}, up = s.update || {}, ws = s.ws || {};
@@ -11941,9 +12310,7 @@ function viewSettings(p) {
   grid.append(settingCard("SSL / TLS", "Сертификат для панели и подписки выдаётся на вкладке «Домены». Reality даёт свою маскировку.",
     [["Листенер ноды", "HTTP (plain)"], ["Reality-маска", rt.enabled ? (rt.sni || "вкл") : "выкл"]],
     [el("button", { html: svg("i-net") + "К доменам", onclick: () => go("domains") })]));
-  grid.append(settingCard("Порты", "Смена портов — через CLI (риск потери доступа к панели).",
-    [["API порт", (s.api || {}).port || "—"], ["Локальный", ws.local_port || "—"], ["Публичный", ws.public_port || "—"], ["Sub", sub.port || "—"]],
-    null));
+  grid.append(portsCard(s, ws, rt, sub));
   p.append(grid);
 }
 
@@ -12121,16 +12488,17 @@ function renderShopBot(box) {
   const planRefs = [];
   for (const pl of plans) {
     const t = el("input", { value: pl.title || "", style: "flex:2;min-width:120px" });
-    const d = el("input", { type: "number", value: pl.days || 30, style: "flex:1;min-width:70px" });
-    const pr = el("input", { type: "number", value: pl.price_rub || 0, style: "flex:1;min-width:80px" });
-    planRefs.push({ id: pl.id, title: t, days: d, price: pr, src: pl });
+    const d = el("input", { type: "number", value: pl.days || 30, style: "flex:1;min-width:60px" });
+    const dev = el("input", { type: "number", min: "0", value: pl.devices || 0, style: "flex:1;min-width:60px" });
+    const pr = el("input", { type: "number", value: pl.price_rub || 0, style: "flex:1;min-width:70px" });
+    planRefs.push({ id: pl.id, title: t, days: d, dev: dev, price: pr, src: pl });
     rows.append(el("div", { class: "planrow", style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px" }, [
-      t, el("span", { class: "mut", text: "дней" }), d, el("span", { class: "mut", text: "₽" }), pr,
+      t, el("span", { class: "mut", text: "дней" }), d, el("span", { class: "mut", text: "устр." }), dev, el("span", { class: "mut", text: "₽" }), pr,
     ]));
   }
   const planSave = el("button", { class: "primary", text: "Сохранить тарифы", onclick: async () => {
     const body = { plans: planRefs.map((r) => Object.assign({}, r.src, {
-      title: r.title.value.trim(), days: parseInt(r.days.value, 10) || 30, price_rub: parseInt(r.price.value, 10) || 0,
+      title: r.title.value.trim(), days: parseInt(r.days.value, 10) || 30, devices: parseInt(r.dev.value, 10) || 0, price_rub: parseInt(r.price.value, 10) || 0,
     })) };
     planSave.disabled = true;
     try { await api("/shopbot", { method: "POST", body }); toast("Тарифы сохранены"); await shopBotReload(box); }
@@ -12149,9 +12517,24 @@ function renderShopBot(box) {
   const webappUrl = location.origin + (wa.url || "/webapp");
 
   box.append(moduleCard({
+    obj: ap, title: "Админ-панель",
+    desc: "Кнопка «Админ-панель» в боте и команда /admin — для Telegram ID из списка админов.",
+    fallbackPrice: 500, contact, moduleKey: "admin", box,
+  }));
+
+  const ie = s.interface || {};
+  box.append(moduleCard({
+    obj: ie, title: "Редактирование интерфейса",
+    desc: "Кастомизация бота: своё приветствие /start, названия / показ / скрытие кнопок меню.",
+    fallbackPrice: 1000, contact, moduleKey: "interface", box,
+    extra: ie.licensed ? el("button", { class: "blue", html: svg("i-edit") + "Открыть редактор",
+      onclick: () => shopBotInterfaceEditor(box) }) : null,
+  }));
+
+  box.append(moduleCard({
     obj: wa, title: "Веб-приложение (Mini App)",
     desc: "Синяя кнопка Menu слева от поля ввода в боте — открывает магазин внутри Telegram.",
-    fallbackPrice: 5000, contact,
+    fallbackPrice: 5000, contact, moduleKey: "webapp", box,
     extra: el("button", { class: "blue", html: svg("i-out") + "WebApp", title: "Открыть страницу приложения",
       onclick: () => window.open(webappUrl, "_blank") }),
     note: el("p", { class: "mut", style: "margin:10px 0 0", html:
@@ -12161,25 +12544,100 @@ function renderShopBot(box) {
         : " Это общая витрина. После покупки привяжите свой домен во вкладке «Домены» — бот начнёт открывать ваше приложение.") }),
   }));
 
-  box.append(moduleCard({
-    obj: ap, title: "Админ-панель",
-    desc: "Кнопка «Админ-панель» в боте и команда /admin — для Telegram ID из списка админов.",
-    fallbackPrice: 500, contact,
-    extra: el("button", { html: svg("i-lock") + "Админ-панель",
-      onclick: () => shopBotLockedModal("Админ-панель",
-        ap.message || "Админ-панель заблокирована. Разблокировка — 500 ₽, писать в Telegram.",
-        ap.price || 500, String(ap.contact || contact)) }),
-  }));
-
   box.append(el("div", { class: "card soft" }, [
     el("p", { class: "mut", style: "margin:0",
-      html: "Модули включает разработчик прямо в боте после оплаты — командой <code>/h1unlock</code>. " +
-            "Из панели разблокировать нельзя: это защита от самостоятельной активации." }),
+      html: "Модули покупаются прямо здесь: жмёте «Купить» → оплата открывается в браузере → " +
+            "после оплаты модуль включается автоматически, без ожидания." }),
   ]));
 }
 
+// Редактор интерфейса (модуль interface): приветствие /start + показ/скрытие
+// кнопок меню. Применяется после перезапуска бота (config.yml перечитывается).
+function shopBotInterfaceEditor(box) {
+  const iface = (SHOPBOT && SHOPBOT.config && SHOPBOT.config.interface) || {};
+  const hidden = new Set(Array.isArray(iface.hidden) ? iface.hidden : []);
+  const BTNS = [
+    ["buy", "🛒 Купить VPN"], ["profile", "👤 Мой VPN"], ["topup", "💳 Пополнить"],
+    ["promo", "🎁 Промокод"], ["ref", "👥 Партнёрка"], ["help", "🆘 Помощь"],
+    ["trial", "🚀 Попробовать бесплатно"], ["webapp", "🌐 WebApp"], ["admin", "🛠 Админ-панель"],
+  ];
+  const welcome = el("textarea", { rows: "4", style: "width:100%", placeholder: "Своё приветствие в /start (пусто = стандартное). HTML разрешён." }, []);
+  welcome.value = iface.welcome || "";
+  const curLabels = (iface.labels && typeof iface.labels === "object") ? iface.labels : {};
+  const checks = {}; const labels = {};
+  const list = el("div", {}, BTNS.map(([k, label]) => {
+    const cb = el("input", { type: "checkbox", title: "показывать кнопку" });
+    cb.checked = !hidden.has(k);
+    checks[k] = cb;
+    const inp = el("input", { value: curLabels[k] || "", placeholder: label, style: "flex:1;min-width:150px" });
+    labels[k] = inp;
+    return el("div", { style: "display:flex;align-items:center;gap:8px;margin:5px 0" }, [cb, inp]);
+  }));
+  const btn = el("button", { class: "primary", text: "Сохранить интерфейс", onclick: async () => {
+    const newHidden = BTNS.filter(([k]) => !checks[k].checked).map(([k]) => k);
+    const newLabels = {};
+    for (const [k] of BTNS) { const v = labels[k].value.trim(); if (v) newLabels[k] = v; }
+    btn.disabled = true;
+    try {
+      await api("/shopbot", { method: "POST", body: { interface: { welcome: welcome.value, hidden: newHidden, order: [], labels: newLabels } } });
+      toast("Интерфейс сохранён. Перезапустите бота, чтобы применить.");
+      closeModal();
+      if (box) await shopBotReload(box);
+    } catch (e) { toast("Ошибка: " + e.message, true); btn.disabled = false; }
+  } });
+  modal({
+    title: "Редактор интерфейса", wide: true,
+    body: [
+      el("p", { class: "mut", text: "Кастомизация бота. Изменения применяются после перезапуска бота." }),
+      el("h3", { text: "Приветствие /start", style: "margin:14px 0 6px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)" }),
+      welcome,
+      el("h3", { text: "Кнопки меню (галочка = показывать · поле = своё название)", style: "margin:16px 0 6px;font-size:12px;letter-spacing:.1em;text-transform:uppercase;color:var(--mut)" }),
+      list,
+    ],
+    footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn],
+  });
+}
+
+// Самооплата модуля: нода создаёт hosted-платёж Platega на биллинге → открываем
+// ссылку в БРАУЗЕРЕ (новая вкладка) → поллим лицензию → карточка зеленеет сама.
+function shopBotBuyModule(moduleKey, price, box) {
+  const methods = [["sbp", "🏦 СБП"], ["card", "💳 Карта РФ"], ["card_eu", "💳 Карта (межд.)"]];
+  modal({
+    title: "Оплата · " + price + " ₽",
+    body: [el("p", { class: "mut", text: "Выберите способ оплаты — ссылка на оплату откроется в браузере:" })],
+    footer: methods.map(([p, label]) => el("button", { class: "primary", text: label,
+      onclick: () => { closeModal(); shopBotDoPurchase(moduleKey, p, box); } }))
+      .concat([el("button", { class: "ghost", text: "Отмена", onclick: closeModal })]),
+  });
+}
+
+async function shopBotDoPurchase(moduleKey, provider, box) {
+  let r;
+  try { r = await api("/shopbot/purchase", { method: "POST", body: { module: moduleKey, provider: provider } }); }
+  catch (e) { toast("Не удалось создать платёж: " + e.message, true); return; }
+  if (!r || !r.pay_url) { toast("Платёж не создан", true); return; }
+  window.open(r.pay_url, "_blank", "noopener");
+  toast("Оплатите в открывшейся вкладке — модуль включится автоматически.");
+  const licCard = (sb) => (moduleKey === "admin" ? sb.admin_panel : sb[moduleKey]) || {};
+  let tries = 0;
+  const iv = setInterval(async () => {
+    tries += 1;
+    let st;
+    try { st = await api("/shopbot"); } catch (e) { return; }
+    const sb = st.shopbot || {};
+    if (licCard(sb).licensed) {
+      clearInterval(iv);
+      SHOPBOT = sb;
+      toast("Модуль активирован ✅");
+      if (box) renderShopBot(box);
+    } else if (tries > 75) {
+      clearInterval(iv);
+    }
+  }, 4000);
+}
+
 // Карточка платного модуля: заперта или активирована — состояние приходит с ноды.
-function moduleCard({ obj, title, desc, fallbackPrice, contact, extra, note }) {
+function moduleCard({ obj, title, desc, fallbackPrice, contact, extra, note, moduleKey, box, soon }) {
   const on = !!(obj && obj.licensed);
   const who = String((obj && obj.contact) || contact || "@welwesov");
   const head = el("div", { class: "lockhead" }, [
@@ -12205,8 +12663,10 @@ function moduleCard({ obj, title, desc, fallbackPrice, contact, extra, note }) {
     el("div", { style: "display:flex;gap:10px;align-items:center;flex-wrap:wrap" }, [
       el("span", { class: "lockprice", text: ((obj && obj.price) || fallbackPrice) + " ₽" }),
       extra,
-      el("button", { class: "primary", html: svg("i-out") + "Написать " + esc(who),
-        onclick: () => window.open("https://t.me/" + who.replace(/^@/, ""), "_blank") }),
+      soon
+        ? el("button", { class: "ghost", text: "Скоро", disabled: true, title: "Редактор интерфейса в разработке" })
+        : el("button", { class: "primary", html: svg("i-out") + "Купить за " + ((obj && obj.price) || fallbackPrice) + " ₽",
+            onclick: () => shopBotBuyModule(moduleKey, (obj && obj.price) || fallbackPrice, box) }),
     ].filter(Boolean)),
     note || null,
   ].filter(Boolean));
@@ -12255,14 +12715,34 @@ async function shopBotPower(action, box) {
 }
 
 async function shopBotLogsModal() {
-  let logs = [];
-  try { const r = await api("/shopbot/logs"); logs = r.logs || []; } catch (e) { logs = ["ошибка: " + e.message]; }
+  // Live-логи: пока модалка открыта — опрашиваем раз в 2с и дописываем с автоскроллом.
+  // Автоскролл только когда юзер уже внизу (не дёргаем, если он листает вверх).
+  // Цикл сам останавливается, когда .logbox исчезает из DOM (модалку закрыли).
+  const box = el("div", { class: "logbox", text: "загрузка…" });
+  const badge = el("div", { class: "live-badge" }, [el("span", { class: "live-dot" }), "в реальном времени"]);
   modal({
     title: "Логи бота",
-    body: [el("div", { class: "logbox", text: logs.length ? logs.join("\n") : "лог пуст" })],
+    body: [badge, box],
     footer: [el("button", { text: "Закрыть", onclick: closeModal })],
     wide: true,
   });
+  let stopped = false;
+  async function tick() {
+    if (stopped || !document.body.contains(box)) { stopped = true; return; }
+    try {
+      const r = await api("/shopbot/logs");
+      const logs = r.logs || [];
+      const atBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+      const text = logs.length ? logs.join("\n") : "лог пуст";
+      if (box.textContent !== text) {
+        box.textContent = text;
+        if (atBottom) box.scrollTop = box.scrollHeight;
+      }
+    } catch (e) { /* сеть моргнула — оставляем прежний текст, пробуем снова */ }
+    if (!stopped) setTimeout(tick, 2000);
+  }
+  await tick();
+  box.scrollTop = box.scrollHeight;
 }
 
 function addWebDomainModal() {
@@ -12602,6 +13082,24 @@ async function viewInbounds(p) {
   renderInboundList();
 }
 
+function nativeInboundActions(ib) {
+  // Нативные (системные) инбаунды: правка через ГОТОВЫЕ модалки настроек ноды,
+  // удаление = выключить канал (reality/wscdn); основной удалить нельзя (база ноды).
+  const id = String(ib.id || "");
+  const pillTxt = ib.security === "reality" ? "reality" : (ib.network || "нативный");
+  const out = [el("span", { class: "pill on", html: '<span class="led on"></span>' + pillTxt })];
+  if (id === "__native_reality__") {
+    out.push(iconBtn("i-edit", "Изменить Reality (SNI / dest / порт / ключи)", (e) => { e.stopPropagation(); realityModal(); }));
+    out.push(iconBtn("i-trash", "Выключить Reality", (e) => { e.stopPropagation(); confirmModal("Выключить Reality?", "Клиенты этой ноды на канале Reality перестанут подключаться, пока не включишь обратно. Основной инбаунд и БС продолжат работать.", async () => { await api("/server/reality", { method: "POST", body: { off: true } }); toast("Reality выключен, xray перезапускается"); setTimeout(refreshInbounds, 2500); }, true); }, "danger"));
+  } else if (id === "__native_wscdn__") {
+    out.push(iconBtn("i-edit", "Настроить / выключить WS-CDN", (e) => { e.stopPropagation(); cdnWsModal(); }));
+  } else if (id === "__native_main__") {
+    out.push(iconBtn("i-edit", "Изменить транспорт / path основного инбаунда", (e) => { e.stopPropagation(); transportModal(); }));
+    out.push(iconBtn("i-net", "Изменить домен (host в ссылках)", (e) => { e.stopPropagation(); domainModal(); }));
+    out.push(iconBtn("i-trash", "Основной инбаунд удалить нельзя", (e) => { e.stopPropagation(); toast("Основной инбаунд — база ноды, его нельзя удалить. Меняй параметры карандашом или переключи транспорт.", true); }, "danger"));
+  }
+  return out;
+}
 function renderInboundList() {
   const host = $("inbHost");
   if (!host) return;
@@ -12632,7 +13130,7 @@ function renderInboundList() {
       ] : ib.id === "__wg__" ? [
         el("span", { class: "pill on", html: '<span class="led on"></span>WireGuard' }),
         iconBtn("i-trash", "Удалить (выключить WireGuard)", (e) => { e.stopPropagation(); inboundDeleteModal(ib); }, "danger"),
-      ] : [
+      ] : (ib.system || String(ib.id || "").indexOf("__native_") === 0) ? nativeInboundActions(ib) : [
         iconBtn(ib.enabled ? "i-power" : "i-power", ib.enabled ? "Выключить" : "Включить", (e) => { e.stopPropagation(); toggleInbEnabled(ib); }),
         iconBtn("i-edit", "Изменить", (e) => { e.stopPropagation(); inboundEditModal(ib); }),
         iconBtn("i-trash", "Удалить", (e) => { e.stopPropagation(); inboundDeleteModal(ib); }, "danger"),
@@ -12912,17 +13410,32 @@ function inboundEditModal(ib) {
   const path = el("input", { value: st.path || "" });
   const host = el("input", { value: st.host || "" });
   const sni = el("input", { value: st.sni || "" });
-  const extra = [];
-  if (["ws", "xhttp", "httpupgrade"].includes(ib.network)) { extra.push(el("label", { class: "f", text: "path" }, [path])); extra.push(el("label", { class: "f", text: "host" }, [host])); }
-  if (ib.security === "tls" || ib.security === "reality") extra.push(el("label", { class: "f", text: "SNI" }, [sni]));
+  const dest = el("input", { value: st.dest || "", placeholder: "www.samsung.com:443" });
+  // Полное редактирование: транспорт + безопасность (reality-ключи генерятся на сервере).
+  const netSel = el("select", {}, ["tcp", "ws", "grpc", "xhttp", "httpupgrade"].map((n) => el("option", { value: n, text: n })));
+  netSel.value = ib.network || "tcp";
+  const secSel = el("select", {}, ["none", "tls", "reality"].map((s) => el("option", { value: s, text: s })));
+  secSel.value = ib.security || "none";
+  const extra = [
+    el("label", { class: "f", text: "транспорт" }, [netSel]),
+    el("label", { class: "f", text: "безопасность" }, [secSel]),
+    el("label", { class: "f", text: "path (ws/xhttp)" }, [path]),
+    el("label", { class: "f", text: "host (ws/xhttp)" }, [host]),
+    el("label", { class: "f", text: "SNI (tls/reality)" }, [sni]),
+    el("label", { class: "f", text: "reality dest" }, [dest]),
+  ];
   const btn = el("button", { class: "primary", text: "Сохранить", onclick: async () => {
     const body = {};
     const tag = refs.tag.value.trim(); if (tag) body.tag = tag;
     const port = parseInt(refs.port.value, 10); if (port) body.port = port;
+    body.network = netSel.value;
+    body.security = secSel.value;
     const stream = {};
-    if (["ws", "xhttp", "httpupgrade"].includes(ib.network)) { stream.path = path.value.trim(); stream.host = host.value.trim(); }
-    if (ib.security === "tls" || ib.security === "reality") stream.sni = sni.value.trim();
-    if (Object.keys(stream).length) body.stream = stream;
+    stream.path = path.value.trim();
+    stream.host = host.value.trim();
+    stream.sni = sni.value.trim();
+    if (dest.value.trim()) stream.dest = dest.value.trim();
+    body.stream = stream;
     btn.disabled = true;
     try { await api("/inbounds/" + ib.id, ibOpts(ib, { method: "PATCH", body })); closeModal(); toast("Инбаунд обновлён, xray перезапускается"); setTimeout(refreshInbounds, 2500); }
     catch (e) { toast(e.message, true); btn.disabled = false; }
@@ -13089,7 +13602,7 @@ function backToMain() {
 }
 function fedBanner() {
   return el("div", { class: "fedbanner" }, [
-    el("span", { html: '🌐 Управляем нодой: <b>' + esc(FED_NODE_NAME) + "</b>" }),
+    el("span", { html: 'Управляем нодой: <b>' + esc(FED_NODE_NAME) + "</b>" }),
     el("button", { class: "ghost", text: "← Вернуться на основную", onclick: backToMain }),
   ]);
 }
@@ -13557,6 +14070,7 @@ class Handler(BaseHTTPRequestHandler):
                     "POST /server/restart",
                     "POST /server/transport",
                     "POST /server/reality",
+                    "POST /server/ports",
                     "POST /server/cdn-ws",
                     "POST /server/cdn-xhttp",
                     "POST /server/egress",
@@ -13932,6 +14446,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if sub == "reality":
                 self.configure_reality(users, data)
+                return
+            if sub in ("ports", "port", "set-port"):
+                self.configure_server_port(users, data)
                 return
             if sub == "egress":
                 self.configure_egress(users, data)
@@ -14588,6 +15105,21 @@ class Handler(BaseHTTPRequestHandler):
                     "traffic_gb": parse_int(t.get("traffic_gb"), 0),
                     "devices": parse_int(t.get("devices"), 1),
                 }
+            if isinstance(data.get("interface"), dict):
+                ic = data["interface"]
+                _order = [str(x) for x in (ic.get("order") or []) if isinstance(x, str)][:20]
+                _hidden = [str(x) for x in (ic.get("hidden") or []) if isinstance(x, str)][:20]
+                _labels = {}
+                if isinstance(ic.get("labels"), dict):
+                    for _lk, _lv in ic["labels"].items():
+                        if isinstance(_lk, str) and isinstance(_lv, str) and _lv.strip():
+                            _labels[_lk] = _lv.strip()[:64]
+                cfg["interface"] = {
+                    "welcome": str(ic.get("welcome") or "").strip()[:2000],
+                    "hidden": _hidden,
+                    "order": _order,
+                    "labels": _labels,
+                }
             if isinstance(data.get("plans"), list):
                 plans = []
                 for p in data["plans"]:
@@ -14636,8 +15168,33 @@ class Handler(BaseHTTPRequestHandler):
                                  "shopbot": shopbot_status()})
             return
 
-        # Платные модули. Включает ТОЛЬКО разработчик командой /h1unlock в самом
-        # боте (его tg id зашит) — владелец ноды через панель разблокировать не может.
+        # Самооплата платного модуля: нода просит биллинг создать hosted-платёж
+        # Platega (креды мерчанта на биллинге, не на ноде). Фронт открывает ссылку
+        # в браузере; после CONFIRMED биллинг сам пишет shopbot_license.json на ноду.
+        if method == "POST" and sub == "purchase":
+            module = str(first_value(data, "module") or "").strip().lower()
+            if module not in ("admin", "webapp", "interface"):
+                self.send_json(400, {"ok": False, "error": "bad_module"})
+                return
+            provider = str(first_value(data, "provider") or "sbp").strip().lower()
+            if provider not in ("sbp", "card", "card_eu"):
+                provider = "sbp"
+            sid = self_server_id()
+            if not sid:
+                self.send_json(502, {"ok": False, "error": "self_server_unresolved"})
+                return
+            code, d = billing_request("POST", "/servers/" + sid + "/shopbot-module",
+                                      {"module": module, "provider": provider}, timeout=45)
+            if code != 200 or not isinstance(d, dict) or not d.get("pay_url"):
+                self.send_json(code or 502, {"ok": False,
+                    "error": (d.get("error") if isinstance(d, dict) else "billing_failed")})
+                return
+            log_action("shopbot_purchase", module)
+            self.send_json(200, {"ok": True, "pay_url": d.get("pay_url"),
+                                 "module": module, "amount": d.get("amount")})
+            return
+
+        # Статус платных модулей (лицензию пишет биллинг после оплаты).
         if sub == "webapp":
             if shopbot_license().get("webapp"):
                 self.send_json(200, {"ok": True, "licensed": True, "url": "/webapp"})
@@ -14790,6 +15347,97 @@ class Handler(BaseHTTPRequestHandler):
         log_action("api_sub_name", name)
         self.send_json(200, {"ok": True, "subscription": {"name": name}, "restart": "requested"})
 
+    def configure_server_port(self, users, data):
+        """Смена порта сервиса (api|sub|reality) на один из ВЫДЕЛЕННЫХ портов сервера.
+
+        reality делегируем в configure_reality (там ключи/sni/dest и оба рестарта).
+        api/sub: пишем порт-файл (api_port.txt/sub_port.txt) и триггерим
+        SUB_RESTART_REQUEST_FILE — bash-мост (handle_sub_restart_request) перезапустит
+        И sub, И api процесс, каждый перечитает свой порт из файла. Порт валидируем
+        против list_allocations() (иначе docker-proxy не пробросит трафик снаружи) и
+        против портов остальных сервисов/инбаундов."""
+        import os as _os
+        service = str(first_value(data, "service", "target", "which")).strip().lower()
+        service = {"api": "api", "panel": "api", "sub": "sub", "subscription": "sub",
+                   "reality": "reality"}.get(service, service)
+        if service not in ("api", "sub", "reality"):
+            self.send_json(400, {"ok": False, "error": "bad_service"})
+            return
+        # В режиме панели нативные sub/reality/ws не поднимаются (инбаунды заводит
+        # оператор сам) — менять их порт бессмысленно. Разрешаем только порт панели.
+        if service != "api" and _panel_mode_active():
+            self.send_json(409, {"ok": False, "error": "panel_mode_no_native",
+                                 "hint": "В режиме панели порты инбаундов меняются во вкладке «Инбаунды»."})
+            return
+        port = parse_int(first_value(data, "port", "new_port"), None)
+        if port is None or port < 1 or port > 65535:
+            self.send_json(400, {"ok": False, "error": "bad_port"})
+            return
+
+        _cfgdir = _os.path.dirname(_os.path.abspath(CONFIG_FILE))
+
+        def _read_port(name):
+            try:
+                with open(_os.path.join(_cfgdir, name), "r", encoding="utf-8") as f:
+                    return parse_int(f.read().strip(), 0)
+            except Exception:
+                return 0
+
+        cur_api = _read_port("api_port.txt") or parse_int(API_PORT, 0)
+        cur_sub = _read_port("sub_port.txt") or parse_int(SUB_PORT, 0)
+        cur_real = _read_port("reality_port.txt") or parse_int(REALITY_PORT, 0)
+        own_cur = {"api": cur_api, "sub": cur_sub, "reality": cur_real}[service]
+
+        if port == own_cur:
+            self.send_json(200, {"ok": True, "service": service, "port": port,
+                                 "restart": "noop", "unchanged": True})
+            return
+
+        # Порт обязан быть выделен серверу в Pterodactyl — иначе сервис забиндится
+        # локально, но wings docker-proxy не пробросит трафик и снаружи будет мёртв.
+        alloc = list_allocations()
+        all_ports = alloc.get("ports") or []
+        if all_ports and port not in all_ports:
+            self.send_json(409, {"ok": False, "error": "port_not_allocated",
+                                 "available": alloc.get("available", [])})
+            return
+
+        # Кросс-сервисный конфликт: нельзя сесть на порт другого сервиса/инбаунда
+        # (валидируем ЕДИНО для api/sub/reality, до делегирования reality).
+        busy = set()
+        for p in (parse_int(XRAY_PORT, 0), parse_int(API_PORT, 0), cur_api, cur_sub, cur_real):
+            if p and p > 0:
+                busy.add(int(p))
+        try:
+            for spec in load_custom_inbounds():
+                busy.add(int(spec.get("port")))
+        except Exception:
+            pass
+        busy.discard(int(own_cur or 0))  # свой текущий порт конфликтом не считаем
+        if port in busy:
+            self.send_json(409, {"ok": False, "error": "port_in_use"})
+            return
+
+        if service == "reality":
+            # reality имеет полноценный обработчик (ключи, sni/dest из текущих, оба рестарта).
+            self.configure_reality(users, dict(data, port=str(port)))
+            return
+
+        if service == "api":
+            atomic_text(_os.path.join(_cfgdir, "api_port.txt"), str(port) + "\n")
+            atomic_text(SUB_RESTART_REQUEST_FILE, f"api_set_api_port {now_ts()}\n")
+            log_action("api_set_api_port", str(port))
+            # moves_panel: фронт покажет новый адрес и НЕ станет авто-рефрешить
+            # (текущая вкладка висит на старом порту и после рестарта умрёт).
+            self.send_json(200, {"ok": True, "service": "api", "port": port,
+                                 "restart": "requested", "moves_panel": True})
+            return
+
+        atomic_text(_os.path.join(_cfgdir, "sub_port.txt"), str(port) + "\n")
+        atomic_text(SUB_RESTART_REQUEST_FILE, f"api_set_sub_port {now_ts()}\n")
+        log_action("api_set_sub_port", str(port))
+        self.send_json(200, {"ok": True, "service": "sub", "port": port, "restart": "requested"})
+
     def configure_panel_credentials(self, users, data):
         # Billing provisions the panel login. No xray/sub restart needed — creds
         # are checked live on /auth/login. If password is omitted we mint one and
@@ -14917,7 +15565,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_text(200, payload, "text/plain; charset=utf-8")
 
     def list_inbounds(self):
-        items = [custom_inbound_payload(s) for s in load_custom_inbounds()]
+        items = native_inbound_payloads() + [custom_inbound_payload(s) for s in load_custom_inbounds()]
         wg = wg_inbound_payload()
         if wg:
             items.insert(0, wg)
@@ -15041,7 +15689,9 @@ class Handler(BaseHTTPRequestHandler):
             stream["private_key"] = priv
             stream["public_key"] = pub
             stream.setdefault("short_id", secrets.token_hex(8))
-            stream.setdefault("dest", (stream.get("sni") or "www.microsoft.com") + ":443")
+            # www.microsoft.com как dest сломан: Certificate-запись >8192 байт
+            # не пролезает в парсер xray (XTLS/Xray-core#6356)
+            stream.setdefault("dest", (stream.get("sni") or "www.samsung.com") + ":443")
 
         spec = {
             "id": "ib_" + secrets.token_hex(5),
@@ -15171,10 +15821,58 @@ class Handler(BaseHTTPRequestHandler):
         tag = strip_outer_quotes(str(first_value(data, "tag") or "").strip())
         if tag:
             target["tag"] = tag
+        # Полное редактирование: протокол / транспорт / безопасность / метод SS.
+        new_proto = str(first_value(data, "protocol") or "").strip().lower()
+        if new_proto:
+            if new_proto not in ("vless", "vmess", "trojan", "shadowsocks", "socks", "http", "dokodemo-door"):
+                self.send_json(400, {"ok": False, "error": "bad_protocol"})
+                return
+            target["protocol"] = new_proto
+        eff_proto = str(target.get("protocol") or "vless").lower()
+        simple_proto = eff_proto in ("socks", "http", "dokodemo-door")
+        new_net = str(first_value(data, "network") or "").strip().lower()
+        if new_net:
+            if simple_proto:
+                new_net = "tcp"
+            if new_net not in ("tcp", "ws", "grpc", "xhttp", "httpupgrade"):
+                self.send_json(400, {"ok": False, "error": "bad_network"})
+                return
+            target["network"] = new_net
+        new_sec = str(first_value(data, "security") or "").strip().lower()
+        if new_sec:
+            if simple_proto:
+                new_sec = "none"
+            if new_sec not in ("none", "tls", "reality"):
+                self.send_json(400, {"ok": False, "error": "bad_security"})
+                return
+            target["security"] = new_sec
+        if str(first_value(data, "method") or "").strip():
+            target["method"] = str(first_value(data, "method")).strip()
+        if str(first_value(data, "target_address", "address") or "").strip():
+            target["target_address"] = strip_outer_quotes(str(first_value(data, "target_address", "address")).strip())
+        _tp = parse_int(first_value(data, "target_port"), None)
+        if _tp is not None and 1 <= _tp <= 65535:
+            target["target_port"] = _tp
         if isinstance(data.get("stream"), dict):
             merged = target.get("stream") if isinstance(target.get("stream"), dict) else {}
             merged.update(data["stream"])
             target["stream"] = merged
+        # reality: если стало reality (или SNI сменили без ключей) — генерим материал.
+        if str(target.get("security")) == "reality":
+            st = target.get("stream") if isinstance(target.get("stream"), dict) else {}
+            if not (st.get("private_key") or st.get("privateKey")):
+                priv, pub = reality_x25519()
+                if not priv:
+                    self.send_json(500, {"ok": False, "error": "keygen_failed"})
+                    return
+                st["private_key"] = priv
+                st["public_key"] = pub
+                st.setdefault("short_id", secrets.token_hex(8))
+                _sni = st.get("sni") or st.get("serverName") or "www.samsung.com"
+                if str(_sni).lower() == "www.microsoft.com":
+                    _sni = "www.samsung.com"
+                st.setdefault("dest", _sni + ":443")
+                target["stream"] = st
         save_custom_inbounds(items)
         atomic_text(XRAY_RESTART_REQUEST_FILE, f"api_inbound_update {now_ts()}\n")
         log_action("api_inbound_update", iid)
