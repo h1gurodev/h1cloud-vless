@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-76"
+SCRIPT_VERSION="2026.08.02-panel-hacker-77"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -11366,13 +11366,28 @@ function renderNav() {
   nav.innerHTML = "";
   for (const n of NAV) {
     nav.append(el("a", {
-      class: state.view === n.id ? "act" : "", href: "#" + n.id,
+      class: state.view === n.id ? "act" : "", href: PANEL_BASE + "/" + n.id,
       html: svg(n.icon) + "<span>" + esc(n.label) + "</span>",
       onclick: (e) => { e.preventDefault(); go(n.id); },
     }));
   }
 }
-function go(view) { state.view = view; location.hash = view; renderNav(); render(); }
+const PANEL_BASE = (function () {
+  const m = location.pathname.match(/^(.*)\/panel(?:\.html)?(?:\/|$)/);
+  return (m ? m[1] : "") + "/panel";
+})();
+function viewFromLocation() {
+  const m = location.pathname.match(/\/panel\/([^\/?#]+)/);
+  let v = m ? decodeURIComponent(m[1]) : "";
+  if (!v && location.hash) v = location.hash.replace(/^#/, "");
+  return NAV.some((n) => n.id === v) ? v : "";
+}
+function go(view) {
+  state.view = view;
+  try { history.pushState({ view: view }, "", PANEL_BASE + "/" + view); }
+  catch (e) { location.hash = view; }
+  renderNav(); render();
+}
 
 /* ---------------- data load ---------------- */
 async function loadAll() {
@@ -13996,9 +14011,10 @@ async function tryLogin(token) {
   localStorage.setItem(LS, token);
   STATUS = st;
   showApp();
+  const initView = viewFromLocation();
+  if (initView) state.view = initView;
   renderNav();
-  const hash = location.hash.replace("#", "");
-  if (NAV.some((n) => n.id === hash)) state.view = hash;
+  try { history.replaceState({ view: state.view }, "", PANEL_BASE + "/" + state.view); } catch (e) { /* no-op */ }
   await loadAll();
   render();
   startPolling();
@@ -14044,9 +14060,9 @@ function init() {
   $("refreshBtn").addEventListener("click", refresh);
   $("restartBtn").innerHTML = svg("i-power");
   $("restartBtn").addEventListener("click", restartModal);
-  window.addEventListener("hashchange", () => {
-    const h = location.hash.replace("#", "");
-    if (NAV.some((n) => n.id === h) && h !== state.view) { state.view = h; renderNav(); render(); }
+  window.addEventListener("popstate", () => {
+    const v = viewFromLocation() || "dash";
+    if (v !== state.view) { state.view = v; renderNav(); render(); }
   });
 
   if (TOKEN) {
