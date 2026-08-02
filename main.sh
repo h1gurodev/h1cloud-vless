@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-75"
+SCRIPT_VERSION="2026.08.02-panel-hacker-76"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -7117,6 +7117,8 @@ def client_payload(user):
     traffic_used = int(traffic_row.get("used_bytes", 0) or 0)
     traffic_limit = int(user.get("traffic_limit_bytes", 0) or 0)
     device_limit = int(user.get("device_limit", 0) or 0)
+    online_at = client_online_at(user.get("name"))
+    online = bool(online_at) and (current - online_at) < ONLINE_WINDOW and not banned
     return {
         "name": user.get("name"),
         "uuid": client_id,
@@ -7146,6 +7148,8 @@ def client_payload(user):
         "device_limit": device_limit,
         "devices_count": len(devices),
         "devices": devices,
+        "online": online,
+        "online_at": online_at,
     }
 
 
@@ -7254,6 +7258,41 @@ def query_xray_stats():
     return result
 
 
+# --- Онлайн-статус клиентов: фоновый сэмплер живых счётчиков xray. Рост
+# uplink+downlink между замерами = активность; после рестарта xray счётчики
+# падают в ноль — падение активностью не считаем.
+ONLINE_LOCK = _threading.Lock()
+ONLINE_COUNTERS = {}
+ONLINE_ACTIVE_AT = {}
+ONLINE_WINDOW = 150
+ONLINE_POLL = 30
+
+
+def _online_sampler_loop():
+    while True:
+        try:
+            live = query_xray_stats() or {}
+            now = now_ts()
+            with ONLINE_LOCK:
+                for name, row in live.items():
+                    total = int(row.get("uplink", 0) or 0) + int(row.get("downlink", 0) or 0)
+                    prev = ONLINE_COUNTERS.get(name)
+                    if prev is not None and total > prev:
+                        ONLINE_ACTIVE_AT[name] = now
+                    ONLINE_COUNTERS[name] = total
+        except Exception:
+            pass
+        time.sleep(ONLINE_POLL)
+
+
+def client_online_at(name):
+    with ONLINE_LOCK:
+        return int(ONLINE_ACTIVE_AT.get(str(name), 0) or 0)
+
+
+_threading.Thread(target=_online_sampler_loop, daemon=True).start()
+
+
 def reality_x25519():
     # Generate an x25519 keypair via the xray binary. Handles all three output
     # formats: "Private key:/Public key:" (old), "PrivateKey:/Password:" (v25.3.6+),
@@ -7311,6 +7350,61 @@ def set_panel_credentials(username, password):
     }
     atomic_json(PANEL_AUTH_FILE, data)
     return data
+
+
+# Троттлинг входа: 5 неудач c одного IP за 5 минут = блок до конца окна.
+LOGIN_FAILS = {}
+LOGIN_FAIL_WINDOW = 300
+LOGIN_FAIL_MAX = 5
+
+
+_LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+
+def _login_throttle_key(handler):
+    try:
+        peer = str(handler.client_address[0])
+    except Exception:
+        peer = ""
+    # X-Forwarded-For спуфится любым клиентом на голом HTTP-порту, поэтому доверяем
+    # ему ТОЛЬКО если сам запрос пришёл с loopback (наш webdomain-nginx на этой ноде).
+    if peer in _LOOPBACK:
+        fwd = str(handler.headers.get("X-Forwarded-For", "") or "").split(",")[0].strip()
+        if fwd:
+            return fwd[:64]
+    return peer or "unknown"
+
+
+def _login_prune(now):
+    # Бэкстоп против переполнения словаря ротацией ключей: чистим протухшие бакеты,
+    # когда их становится слишком много.
+    if len(LOGIN_FAILS) <= 4096:
+        return
+    for k in list(LOGIN_FAILS.keys()):
+        rows = [t for t in LOGIN_FAILS.get(k, []) if now - t < LOGIN_FAIL_WINDOW]
+        if rows:
+            LOGIN_FAILS[k] = rows
+        else:
+            LOGIN_FAILS.pop(k, None)
+
+
+def login_throttled(key):
+    now = now_ts()
+    rows = [t for t in LOGIN_FAILS.get(key, []) if now - t < LOGIN_FAIL_WINDOW]
+    LOGIN_FAILS[key] = rows
+    if len(rows) >= LOGIN_FAIL_MAX:
+        return max(1, LOGIN_FAIL_WINDOW - (now - rows[0]))
+    return 0
+
+
+def login_fail(key):
+    now = now_ts()
+    LOGIN_FAILS.setdefault(key, []).append(now)
+    _login_prune(now)
+
+
+def login_ok(key):
+    LOGIN_FAILS.pop(key, None)
 
 
 def verify_panel_login(username, password):
@@ -11327,6 +11421,7 @@ function viewDash(p) {
   p.append(el("div", { class: "tiles" }, [
     tile("Клиенты всего", c.total ?? CLIENTS.length, "", null, "hot", "i-users"),
     tile("Активные", c.active ?? 0, "", expSoon ? expSoon + " истекают ≤3дн" : "все в норме", expSoon ? "warn" : "", "i-power"),
+    tile("Онлайн сейчас", CLIENTS.filter((x) => x.online).length, "", "трафик за последние 2 мин", "", "i-net"),
     tile("Забанены", c.banned ?? 0, "", null, (c.banned ? "bad" : ""), "i-ban"),
     tile("Истекли", c.expired ?? 0, "", null, "", "i-clock"),
     tile("Суммарный трафик", fmtGb(Math.round(usedGb * 100) / 100).replace(" ГБ", "").replace(" ТБ", ""), usedGb >= 1024 ? "ТБ" : "ГБ", "по всем клиентам", "", "i-gauge"),
@@ -11415,6 +11510,7 @@ function pill(on, onTxt, offTxt) {
 /* ---------- clients ---------- */
 let CLIENTS_VIEW = [];
 let CLIENTS_ALL = [];
+const CLIENT_SEL = new Set();
 let SELF_NAME = "";
 // Имя ЭТОЙ панели (для маркера origin, который она ставит на реплики соседних нод).
 async function ensureSelfName() {
@@ -11438,6 +11534,9 @@ function dedupClients(list) {
     // Канальные ссылки удалённой панели (БС/xhttp_cdn, ws_cdn, reality…) лежат в c.links, НЕ в inbound_links —
     // подтягиваем их отдельно, чтобы разворот показывал ВСЕ локации, как и подписка.
     if (c._node && c.links) for (const k of CONN_CHANNELS) if (c.links[k]) g.remoteConns.push({ k: k, link: c.links[k], bsLabel: c.bs_label, node: c._node });
+    // Онлайн-статус клиента — max по всем нодам его bundle (клиент может лить трафик на удалённой локации).
+    if (c.online) g.online = true;
+    if (c.online_at) g.onlineAt = Math.max(g.onlineAt || 0, c.online_at);
     if (!c._node) { g.rep = c; g.hasLocal = true; g.localOrigin = c.origin || null; }
   }
   const out = [];
@@ -11450,7 +11549,8 @@ function dedupClients(list) {
     const iblSet = new Set(mergedIbl.map((il) => il.link));
     const seenR = {};
     const remoteConns = g.remoteConns.filter((rc) => rc.link && !localLinkSet.has(rc.link) && !iblSet.has(rc.link) && (seenR[rc.link] ? false : (seenR[rc.link] = true)));
-    out.push(Object.assign({}, g.rep, { _panels: g.panels, inbound_links: mergedIbl, origin: origin, _remoteConns: remoteConns }));
+    out.push(Object.assign({}, g.rep, { _panels: g.panels, inbound_links: mergedIbl, origin: origin, _remoteConns: remoteConns,
+      online: !!(g.rep.online || g.online), online_at: Math.max(g.rep.online_at || 0, g.onlineAt || 0) }));
   });
   return out;
 }
@@ -11493,8 +11593,9 @@ function viewClients(p) {
   })();
 }
 function buildClientsView(p) {
-  const counts = { all: CLIENTS_VIEW.length, active: 0, expiring: 0, expired: 0, banned: 0 };
+  const counts = { all: CLIENTS_VIEW.length, active: 0, expiring: 0, expired: 0, banned: 0, online: 0 };
   for (const c of CLIENTS_VIEW) {
+    if (c.online) counts.online++;
     if (c.banned) counts.banned++;
     else if (c.left_days <= 0) counts.expired++;
     else { counts.active++; if (c.left_days <= 3) counts.expiring++; }
@@ -11512,20 +11613,33 @@ function buildClientsView(p) {
       chip("expiring", "≤3дн · " + counts.expiring),
       chip("expired", "истёк · " + counts.expired),
       chip("banned", "бан · " + counts.banned),
+      chip("online", "онлайн · " + counts.online),
     ]),
     el("div", { style: "flex:1" }, []),
+    el("button", { class: "ghost", html: svg("i-clock") + "Истёкшие", onclick: () => {
+      const exp = CLIENTS_VIEW.filter((c) => !c.banned && c.left_days <= 0);
+      if (!exp.length) return toast("Истёкших клиентов нет");
+      CLIENT_SEL.clear(); exp.forEach((c) => CLIENT_SEL.add(c._ckey));
+      renderClientRows(); renderBulkBar();
+      toast("Выбраны истёкшие: " + exp.length + " — действия в панели над таблицей");
+    } }),
     el("button", { class: "primary", html: svg("i-plus") + "Новый клиент", onclick: createClientModal }),
   ]);
   p.append(tools);
+  p.append(el("div", { id: "bulkBar", class: "bar-tools", style: "display:none;gap:8px;align-items:center;flex-wrap:wrap" }, []));
 
   const table = el("table", { class: "tbl" }, [
     el("thead", {}, [el("tr", {}, [
+      (() => { const cb = el("input", { type: "checkbox", title: "выбрать всех по текущему фильтру" });
+        cb.onchange = () => { const rows = filterClients(); if (cb.checked) rows.forEach((c) => CLIENT_SEL.add(c._ckey)); else rows.forEach((c) => CLIENT_SEL.delete(c._ckey)); renderClientRows(); renderBulkBar(); };
+        return el("th", { style: "width:34px" }, [cb]); })(),
       th("Клиент"), th("Статус"), th("Осталось"), th("Трафик"), th("Устройства"), th("", "text-align:right"),
     ])]),
     el("tbody", { id: "clientRows" }, []),
   ]);
   p.append(el("div", { class: "card tblwrap", style: "padding:0" }, [table]));
   renderClientRows();
+  renderBulkBar();
 }
 function th(t, style) { return el("th", style ? { style } : {}, [t]); }
 function chip(id, label) {
@@ -11539,6 +11653,7 @@ function filterClients() {
     else if (state.filter === "expiring") { if (c.banned || c.left_days <= 0 || c.left_days > 3) return false; }
     else if (state.filter === "expired") { if (c.banned || c.left_days > 0) return false; }
     else if (state.filter === "banned") { if (!c.banned) return false; }
+    else if (state.filter === "online") { if (!c.online) return false; }
     if (q && !(String(c.name || "").toLowerCase().includes(q) || String(c.uuid || "").toLowerCase().includes(q))) return false;
     return true;
   });
@@ -11548,16 +11663,19 @@ function renderClientRows() {
   if (!tb) return;
   tb.innerHTML = "";
   const rows = filterClients();
-  if (!rows.length) { tb.append(el("tr", {}, [el("td", { colspan: "6" }, [el("div", { class: "empty", text: "нет клиентов" })])])); return; }
+  if (!rows.length) { tb.append(el("tr", {}, [el("td", { colspan: "7" }, [el("div", { class: "empty", text: "нет клиентов" })])])); return; }
   for (const c of rows) {
     const st = clientStatus(c);
-    const tr = el("tr", { class: "expandable", onclick: (e) => { if (e.target.closest("button")) return; toggleExpand(c._ckey); } }, [
+    const tr = el("tr", { class: "expandable", onclick: (e) => { if (e.target.closest("button") || e.target.closest("input")) return; toggleExpand(c._ckey); } }, [
+      el("td", {}, [(() => { const cb = el("input", { type: "checkbox" }); cb.checked = CLIENT_SEL.has(c._ckey);
+        cb.onclick = (e) => { e.stopPropagation(); if (cb.checked) CLIENT_SEL.add(c._ckey); else CLIENT_SEL.delete(c._ckey); renderBulkBar(); }; return cb; })()]),
       el("td", { class: "namecell" }, [
         el("div", { class: "name", text: c.name }),
         el("div", { class: "sub", text: (c.uuid || "").slice(0, 18) + "…" }),
         clientPanelBadge(c),
       ].filter(Boolean)),
-      el("td", { "data-label": "Статус" }, [el("span", { class: "pill " + st.k, html: '<span class="led ' + st.k + '"></span>' + st.t })]),
+      el("td", { "data-label": "Статус" }, [el("span", { class: "pill " + st.k, html: '<span class="led ' + st.k + '"></span>' + st.t }),
+        c.online ? el("span", { class: "pill on", style: "margin-left:6px", html: '<span class="led on"></span>онлайн' }) : null].filter(Boolean)),
       el("td", { "data-label": "Осталось" }, [c.banned ? "—" : fmtDays(c.left_days), el("div", { class: "sub", text: c.banned ? (c.ban_reason || "забанен") : fmtTs(c.expires_at) })]),
       el("td", { "data-label": "Трафик" }, [trafficCell(c)]),
       el("td", { "data-label": "Устройства" }, [deviceCell(c)]),
@@ -11575,6 +11693,69 @@ function renderClientRows() {
   }
 }
 function toggleExpand(key) { if (state.expanded.has(key)) state.expanded.delete(key); else state.expanded.add(key); renderClientRows(); }
+function selectedClients() { return CLIENTS_VIEW.filter((c) => CLIENT_SEL.has(c._ckey)); }
+function renderBulkBar() {
+  const host = $("bulkBar"); if (!host) return;
+  host.innerHTML = "";
+  const sel = selectedClients();
+  if (!sel.length) { host.style.display = "none"; return; }
+  host.style.display = "flex";
+  host.append(el("span", { class: "mut", text: "Выбрано: " + sel.length }));
+  host.append(el("button", { class: "ghost", html: svg("i-clock") + "Продлить", onclick: bulkExtendModal }));
+  host.append(el("button", { class: "ghost", html: svg("i-ban") + "Бан", onclick: () => bulkAction("ban") }));
+  host.append(el("button", { class: "ghost", html: svg("i-unban") + "Разбан", onclick: () => bulkAction("unban") }));
+  host.append(el("button", { class: "ghost", html: svg("i-copy") + "Экспорт ссылок", onclick: bulkExportLinks }));
+  host.append(el("button", { class: "danger", html: svg("i-trash") + "Удалить", onclick: () =>
+    confirmModal("Удалить выбранных", "Будут удалены " + sel.length + " клиент(ов) со всеми ссылками и членством в инбаундах. Продолжить?", () => bulkAction("delete"), true) }));
+  host.append(el("button", { class: "ghost", text: "Снять выбор", onclick: () => { CLIENT_SEL.clear(); renderClientRows(); renderBulkBar(); } }));
+}
+async function bulkAction(action, days) {
+  const sel = selectedClients();
+  if (!sel.length) return;
+  const groups = {};
+  for (const c of sel) { const k = c._node ? c._node.id : "self"; (groups[k] = groups[k] || { node: c._node, names: [] }).names.push(c.name); }
+  let ok = 0, fail = 0;
+  for (const k of Object.keys(groups)) {
+    const g = groups[k];
+    const opts = { method: "POST", body: { action, names: g.names } };
+    if (days) opts.body.days = days;
+    if (g.node) opts.node = g.node.id;
+    try { const r = await api("/clients/bulk", opts); ok += r.count || g.names.length; }
+    catch (e) { fail += g.names.length; toast((g.node ? g.node.name + ": " : "") + (e.message || e), true); }
+  }
+  CLIENT_SEL.clear();
+  if (ok) toast(({ extend: "Продлено: ", ban: "Забанено: ", unban: "Разбанено: ", delete: "Удалено: " })[action] + ok + (fail ? " · ошибок: " + fail : ""));
+  setTimeout(refresh, 1200);
+}
+function bulkExtendModal() {
+  const inp = el("input", { type: "number", min: "1", max: "3650", value: "30" });
+  const btn = el("button", { class: "primary", text: "Продлить", onclick: () => {
+    const d = Number(inp.value); if (!d || d < 1) return toast("Введи количество дней", true);
+    closeModal(); bulkAction("extend", d);
+  } });
+  modal({ title: "Продлить выбранных (" + selectedClients().length + ")",
+    body: [el("label", { class: "f", text: "на сколько дней (плюсом к текущему сроку)" }, [inp])],
+    footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn] });
+}
+function bulkExportLinks() {
+  const sel = selectedClients();
+  const NL = String.fromCharCode(10);
+  const lines = [];
+  for (const c of sel) {
+    lines.push("# " + c.name);
+    if (c.sub_url) lines.push(c.sub_url);
+    for (const k of Object.keys(c.links || {})) { if (c.links[k]) lines.push(c.links[k]); }
+    for (const il of (c.inbound_links || [])) { if (il && il.link) lines.push(il.link); }
+    lines.push("");
+  }
+  const blob = new Blob([lines.join(NL)], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "clients-links.txt";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  toast("Выгружено клиентов: " + sel.length);
+}
 function iconBtn(icon, title, onclick, cls) {
   return el("button", { class: "icon ghost " + (cls || ""), title, html: svg(icon), onclick });
 }
@@ -11648,7 +11829,7 @@ function connRow(badges, title, loc, link, dl) {
 }
 function expandRow(c) {
   const links = c.links || {};
-  const body = el("td", { colspan: "6" }, []);
+  const body = el("td", { colspan: "7" }, []);
   const grid = el("div", { class: "grid2" }, []);
   const box = el("div", {}, [el("h3", { text: "Подключения", style: "font-size:11px;color:var(--mut);letter-spacing:.16em;text-transform:uppercase;margin-bottom:10px" })]);
   // Общая подписка — все инбаунды клиента в одной ссылке + глобальный QR.
@@ -13803,7 +13984,8 @@ async function loginWithCreds(username, password) {
   let data = {};
   try { data = await res.json(); } catch {}
   if (!res.ok || !data.token) {
-    throw new Error(res.status === 401 ? "неверный логин или пароль" : (data.error || "ошибка входа"));
+    throw new Error(res.status === 429 ? (data.message || "слишком много попыток входа — подожди немного")
+      : res.status === 401 ? "неверный логин или пароль" : (data.error || "ошибка входа"));
   }
   await tryLogin(data.token);
 }
@@ -14062,10 +14244,19 @@ class Handler(BaseHTTPRequestHandler):
             data.update(self.read_body())
             username = (data.get("username") or "").strip()
             password = data.get("password") or ""
+            throttle_key = _login_throttle_key(self)
+            wait = login_throttled(throttle_key)
+            if wait > 0:
+                log_action("panel_login_throttled", throttle_key)
+                self.send_json(429, {"ok": False, "error": "too_many_attempts", "retry_after": wait,
+                                     "message": "Слишком много попыток входа — подожди %d сек." % wait})
+                return
             if verify_panel_login(username, password):
+                login_ok(throttle_key)
                 log_action("panel_login", username)
                 self.send_json(200, {"ok": True, "token": API_TOKEN})
             else:
+                login_fail(throttle_key)
                 log_action("panel_login_failed", username)
                 self.send_json(401, {"ok": False, "error": "invalid_credentials"})
             return
@@ -14532,6 +14723,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.ban_client(users, parts[1], data)
             else:
                 self.unban_client(users, parts[1])
+            return
+
+        if method == "POST" and parts and parts[0] in ("clients", "users") and len(parts) == 2 and parts[1] == "bulk":
+            self.bulk_clients(users, data)
             return
 
         if method in ("POST", "PUT", "PATCH") and parts and parts[0] in ("clients", "users") and len(parts) == 3 and parts[2] in ("reset-traffic", "reset-devices"):
@@ -15954,6 +16149,9 @@ class Handler(BaseHTTPRequestHandler):
         if not validate_name(name):
             self.send_json(400, {"ok": False, "error": "bad_name"})
             return
+        if name.lower() in ("bulk",):
+            self.send_json(400, {"ok": False, "error": "reserved_name"})
+            return
         if days is None or days <= 0:
             self.send_json(400, {"ok": False, "error": "bad_days"})
             return
@@ -16091,6 +16289,9 @@ class Handler(BaseHTTPRequestHandler):
             if not validate_name(new_name):
                 self.send_json(400, {"ok": False, "error": "bad_new_name"})
                 return
+            if new_name.lower() in ("bulk",):
+                self.send_json(400, {"ok": False, "error": "reserved_name"})
+                return
             if any(user.get("name") == new_name and user is not target for user in users):
                 self.send_json(409, {"ok": False, "error": "user_already_exists"})
                 return
@@ -16209,6 +16410,88 @@ class Handler(BaseHTTPRequestHandler):
         save_users(users)
         log_action("api_client_edit", f"{name} {' '.join(changed)}")
         self.send_json(200, {"ok": True, "client": client_payload(target)})
+
+    def bulk_clients(self, users, data):
+        # Массовые операции над клиентами: extend / ban / unban / delete.
+        if upstream_enabled():
+            self.send_json(409, {"ok": False, "error": "bulk_not_supported_upstream"})
+            return
+        action = str(first_value(data, "action")).strip().lower()
+        if action not in ("extend", "ban", "unban", "delete"):
+            self.send_json(400, {"ok": False, "error": "bad_action"})
+            return
+        names = [n for n in _parse_str_list(data.get("names")) if validate_name(n)]
+        if not names:
+            self.send_json(400, {"ok": False, "error": "no_names"})
+            return
+        wanted = set(names)
+        days = parse_int(first_value(data, "days"), None)
+        if action == "extend" and (days is None or days <= 0):
+            self.send_json(400, {"ok": False, "error": "bad_days"})
+            return
+        reason = str(first_value(data, "reason") or "").strip()
+        done = []
+        if action == "delete":
+            removed = [u for u in users if u.get("name") in wanted]
+            if not removed:
+                self.send_json(404, {"ok": False, "error": "users_not_found"})
+                return
+            keep = [u for u in users if u.get("name") not in wanted]
+            removed_ids = [str(u.get("uuid", "")) for u in removed]
+            save_users(keep)
+            for u in removed:
+                if u.get("wg"):
+                    try:
+                        wg_request("del", str(u.get("uuid", "")), str(u.get("name")))
+                    except Exception:
+                        pass
+            try:
+                rm_names = set(str(u.get("name")) for u in removed)
+                citems = load_custom_inbounds()
+                cdirty = False
+                for spec in citems:
+                    cl = spec.get("clients") if isinstance(spec.get("clients"), list) else []
+                    nc = [c for c in cl if not (isinstance(c, dict) and c.get("email") in rm_names)]
+                    if len(nc) != len(cl):
+                        spec["clients"] = nc
+                        cdirty = True
+                if cdirty:
+                    save_custom_inbounds(citems)
+                    atomic_text(XRAY_RESTART_REQUEST_FILE, "api_bulk_delete %d" % now_ts())
+            except Exception:
+                pass
+            devices = load_devices()
+            traffic = load_traffic()
+            for cid in removed_ids:
+                devices.pop(cid, None)
+                traffic.pop(cid, None)
+            save_devices(devices)
+            save_traffic(traffic)
+            done = [str(u.get("name")) for u in removed]
+        else:
+            now = now_ts()
+            for u in users:
+                if u.get("name") not in wanted:
+                    continue
+                if action == "extend":
+                    base = max(now, int(u.get("expires_at", now) or now))
+                    u["expires_at"] = base + days * 86400
+                elif action == "ban":
+                    u["banned"] = True
+                    u["banned_at"] = now
+                    u["ban_reason"] = reason
+                else:
+                    u["banned"] = False
+                    u.pop("disabled", None)
+                    u.pop("banned_at", None)
+                    u.pop("ban_reason", None)
+                done.append(str(u.get("name")))
+            if not done:
+                self.send_json(404, {"ok": False, "error": "users_not_found"})
+                return
+            save_users(users)
+        log_action("api_clients_bulk", "%s n=%d" % (action, len(done)))
+        self.send_json(200, {"ok": True, "action": action, "count": len(done), "names": done})
 
     def ban_client(self, users, name, data):
         if not validate_name(name):
