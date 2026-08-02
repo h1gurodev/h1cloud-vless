@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-74"
+SCRIPT_VERSION="2026.08.02-panel-hacker-75"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -11259,7 +11259,6 @@ const NAV = [
   { id: "dash", label: "Обзор", icon: "i-dash" },
   { id: "clients", label: "Клиенты", icon: "i-users" },
   { id: "inbounds", label: "Инбаунды", icon: "i-chip" },
-  { id: "transport", label: "Транспорт", icon: "i-net" },
   { id: "settings", label: "Настройки", icon: "i-gear" },
   { id: "domains", label: "Домены", icon: "i-net" },
   { id: "federation", label: "Серверы", icon: "i-fed" },
@@ -11306,7 +11305,7 @@ function render() {
   const p = $("page");
   p.innerHTML = "";
   if (FED_NODE) p.append(fedBanner());
-  ({ dash: viewDash, clients: viewClients, inbounds: viewInbounds, transport: viewTransport, settings: viewSettings,
+  ({ dash: viewDash, clients: viewClients, inbounds: viewInbounds, settings: viewSettings,
      domains: viewDomains, federation: viewFederation, shopbot: viewShopBot, migrate: viewMigrate, backups: viewBackups, logs: viewLogs }[state.view] || viewDash)(p);
 }
 
@@ -12130,11 +12129,11 @@ function settingCard(title, subtitle, rows, buttons) {
    меняются на лету). Локальный/публичный WS — первичная аллокация контейнера
    (env-lock, на ноде часто совпадает с портом панели), их не трогаем. */
 function portsRow(label, value, onEdit) {
-  const dd = el("dd", {}, [
+  const dd = el("dd", { style: "display:flex;align-items:center;gap:4px;min-height:32px" }, [
     el("span", { text: value == null || value === "" ? "—" : String(value) }),
   ]);
   if (onEdit) dd.append(iconBtn("i-edit", "Изменить порт", onEdit));
-  return [el("dt", { text: label }), dd];
+  return [el("dt", { text: label, style: "align-self:center" }), dd];
 }
 function portsCard(s, ws, rt, sub) {
   const apiP = (s.api || {}).port;
@@ -12242,12 +12241,20 @@ function viewSettings(p) {
   const s = STATUS || {};
   const rt = s.reality || {}, sub = s.subscription || {}, up = s.update || {}, ws = s.ws || {};
   const grid = el("div", { class: "grid2" }, []);
-  grid.append(settingCard("Обновления", "Авто-обновление скрипта ноды.",
-    [["URL", up.url || "—"], ["Авто", up.auto ? "вкл" : "выкл"]],
-    [el("button", { class: "primary", html: svg("i-refresh") + "Настроить", onclick: updateModal })]));
-  grid.append(settingCard("SSL / TLS", "Сертификат для панели и подписки выдаётся на вкладке «Домены». Reality даёт свою маскировку.",
-    [["Листенер ноды", "HTTP (plain)"], ["Reality-маска", rt.enabled ? (rt.sni || "вкл") : "выкл"]],
-    [el("button", { html: svg("i-net") + "К доменам", onclick: () => go("domains") })]));
+  const updNote = el("p", { class: "mut", style: "margin-top:8px;display:none;color:var(--acc,#35ff8b)" });
+  const updCard = settingCard("Обновления", "Авто-обновление скрипта ноды.",
+    [["Версия", s.version || "—"], ["URL", up.url || "—"], ["Авто", up.auto ? "вкл" : "выкл"]],
+    [el("button", { class: "primary", html: svg("i-refresh") + "Настроить", onclick: updateModal }),
+     el("button", { class: "ghost", html: svg("i-refresh") + "Проверить обновления", onclick: (e) => checkUpdates(e.currentTarget, updNote) })]);
+  updCard.append(updNote);
+  grid.append(updCard);
+  // Тихая проверка при открытии настроек: если вышла новая версия — пишем, что можно обновить.
+  (async () => {
+    try {
+      const r = await api("/server/update-check");
+      if (r.available) { updNote.style.display = ""; updNote.textContent = "Доступно обновление " + r.remote + " — можно обновить."; }
+    } catch (e) { /* тихо */ }
+  })();
   grid.append(portsCard(s, ws, rt, sub));
   p.append(grid);
 }
@@ -12949,6 +12956,28 @@ function subNameModal() {
   modal({ title: "Имя подписки", body: [wrap], footer });
 }
 
+async function checkUpdates(btn, note) {
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api("/server/update-check");
+    if (r.available) {
+      if (note) { note.style.display = ""; note.textContent = "Доступно обновление " + r.remote + " — можно обновить."; }
+      modal({
+        title: "Доступно обновление",
+        body: [
+          kv([["Установлена", r.current || "—"], ["Доступна", r.remote || "—"]]),
+          el("p", { class: "mut", style: "margin-top:10px", text: r.auto
+            ? "Можно обновить: нода подтянет новую версию автоматически в течение часа и перезапустится сама."
+            : "Авто-обновление выключено — включи его через «Настроить», и нода обновится в течение часа." }),
+        ],
+        footer: [el("button", { class: "primary", text: "Понятно", onclick: closeModal })],
+      });
+    } else {
+      toast("Установлена последняя версия" + (r.current ? ": " + r.current : ""));
+    }
+  } catch (e) { toast("Не удалось проверить обновления: " + (e.message || e), true); }
+  if (btn) btn.disabled = false;
+}
 function updateModal() {
   const up = (STATUS || {}).update || {};
   const autoSel = el("select", {}, [el("option", { value: "on", text: "вкл" }), el("option", { value: "off", text: "выкл" })]);
@@ -14429,6 +14458,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, dict({"ok": True}, **list_allocations()))
             return
 
+        if method == "GET" and parts and parts[0] == "server" and len(parts) >= 2 and parts[1] in ("update-check", "check-update"):
+            self.update_check()
+            return
+
         if parts and parts[0] == "federation":
             if method == "GET":
                 self.send_json(200, {"ok": True, "federation": federation_payload()})
@@ -15217,6 +15250,29 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(200, {"ok": True, "domain": entry, "domains": lst})
             return
         self.send_json(404, {"ok": False, "error": "not_found"})
+
+    def update_check(self):
+        # Качаем только начало скрипта с зафиксированного URL и сравниваем SCRIPT_VERSION.
+        current = (os.environ.get("SCRIPT_VERSION") or "").strip()
+        try:
+            req = urllib.request.Request(FORCED_UPDATE_URL, headers={"User-Agent": "h1cloud-node/update-check"})
+            with urllib.request.urlopen(req, timeout=20) as resp:
+                head = resp.read(65536)
+        except Exception as exc:
+            self.send_json(502, {"ok": False, "error": "check_failed", "message": str(exc)[:200]})
+            return
+        m = re.search(rb'^SCRIPT_VERSION="([^"]+)"', head, re.M)
+        remote = m.group(1).decode("utf-8", "replace").strip() if m else ""
+        if not remote:
+            self.send_json(502, {"ok": False, "error": "no_remote_version"})
+            return
+        self.send_json(200, {
+            "ok": True,
+            "current": current,
+            "remote": remote,
+            "available": bool(remote) and remote != current,
+            "auto": enabled_from_file(AUTO_UPDATE_FILE),
+        })
 
     def configure_update_settings(self, users, data):
         url_value = strip_outer_quotes(str(first_value(data, "url", "update_url") or "").strip())
