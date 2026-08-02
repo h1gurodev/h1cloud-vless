@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.01-panel-hacker-73"
+SCRIPT_VERSION="2026.08.02-panel-hacker-74"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -9060,18 +9060,22 @@ def list_allocations():
     # reality_port.txt): глобалы API_PORT/SUB_PORT/REALITY_PORT снимаются из argv при
     # СТАРТЕ api-процесса и устаревают, если сервис включили/переставили ПОЗЖЕ (напр.
     # reality после старта панели) — тогда его порт ошибочно попадал в "available".
-    try:
-        _cfgdir = _os.path.dirname(_os.path.abspath(CONFIG_FILE))
-        for _pf in ("api_port.txt", "sub_port.txt", "reality_port.txt", "reality_public_port.txt"):
-            try:
-                with open(_os.path.join(_cfgdir, _pf), "r", encoding="utf-8") as _f:
-                    _v = int(_f.read().strip())
-                if _v > 0:
-                    used.add(_v)
-            except Exception:
-                pass
-    except Exception:
-        pass
+    # В панель-режиме (_panel_mode_active()) нативные ws/reality/sub НЕ поднимаются —
+    # эти файлы могут содержать порты от предыдущего не-панельного состояния и не должны
+    # блокировать порты, которые оператор панели фактически может использовать.
+    if not _panel_mode_active():
+        try:
+            _cfgdir = _os.path.dirname(_os.path.abspath(CONFIG_FILE))
+            for _pf in ("api_port.txt", "sub_port.txt", "reality_port.txt", "reality_public_port.txt"):
+                try:
+                    with open(_os.path.join(_cfgdir, _pf), "r", encoding="utf-8") as _f:
+                        _v = int(_f.read().strip())
+                    if _v > 0:
+                        used.add(_v)
+                except Exception:
+                    pass
+        except Exception:
+            pass
     available = [p for p in all_ports if p not in used]
     return {
         "ports": all_ports,
@@ -9240,73 +9244,6 @@ def bs_main_inbound_payload():
         "clients_count": len(clients),
         "system": True,
     }
-
-
-def native_inbound_payloads():
-    """Read-only карточки НАТИВНЫХ инбаундов ноды (основной xhttp/ws + reality + cdn-ws),
-    чтобы они были видны в списке панели и в федеративной агрегации на основной ноде.
-    Клиентами рулит вкладка «Клиенты»; тут — только показ (порт/транспорт/клиенты)."""
-    out = []
-    host = read_domain()
-    try:
-        users = [u for u in load_users(prune=False)
-                 if not (u.get("banned") or u.get("disabled"))]
-    except Exception:
-        users = []
-    # 1) основной инбаунд (xhttp или ws в зависимости от TRANSPORT)
-    if TRANSPORT == "xhttp":
-        main_net, main_tag, linkfn = "xhttp", "Основной · XHTTP", make_xhttp_link
-        main_stream = {"path": XHTTP_PATH, "host": host}
-        main_method = XHTTP_METHOD
-    else:
-        main_net, main_tag, linkfn = "ws", "Основной · WebSocket", make_ws_link
-        main_stream = {"path": "/xray", "host": host}
-        main_method = None
-    main_sec = "tls" if str(PUBLIC_PORT) == "443" else "none"
-    mclients = []
-    for u in users:
-        if not user_wants_channel(u, "main"):
-            continue
-        mclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")),
-                         "link": linkfn(u) or ""})
-    out.append({
-        "id": "__native_main__", "tag": main_tag, "enabled": True, "protocol": "vless",
-        "port": PUBLIC_PORT, "listen": "0.0.0.0", "network": main_net, "security": main_sec,
-        "stream": main_stream, "method": main_method,
-        "clients": mclients, "clients_count": len(mclients), "system": True,
-    })
-    # 2) reality
-    if REALITY_ENABLED:
-        rclients = []
-        for u in users:
-            if not user_wants_channel(u, "reality"):
-                continue
-            rclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")),
-                             "link": make_reality_link(u) or ""})
-        out.append({
-            "id": "__native_reality__", "tag": "Reality", "enabled": True, "protocol": "vless",
-            "port": PUBLIC_REALITY_PORT, "listen": "0.0.0.0", "network": "tcp", "security": "reality",
-            "stream": {"sni": REALITY_SNI, "dest": REALITY_DEST,
-                       "public_host": REALITY_PUBLIC_HOST, "short_id": REALITY_SHORT_ID,
-                       "public_key": REALITY_PUBLIC_KEY},
-            "method": None, "clients": rclients, "clients_count": len(rclients), "system": True,
-        })
-    # 3) cdn-ws (если включён)
-    if CDN_WS_ENABLED and CDN_WS_HOST:
-        wclients = []
-        for u in users:
-            if not user_wants_channel(u, "wscdn"):
-                continue
-            l = make_cdn_ws_link(u)
-            if l:
-                wclients.append({"email": u.get("name"), "id": str(u.get("uuid", "")), "link": l})
-        out.append({
-            "id": "__native_wscdn__", "tag": (CDN_WS_TAG or "CDN") + " · WS", "enabled": True,
-            "protocol": "vless", "port": CDN_WS_PORT, "listen": "0.0.0.0", "network": "ws",
-            "security": "tls", "stream": {"path": CDN_WS_PATH, "host": CDN_WS_SNI, "sni": CDN_WS_SNI},
-            "method": None, "clients": wclients, "clients_count": len(wclients), "system": True,
-        })
-    return out
 
 
 def status_payload(users):
@@ -11839,6 +11776,7 @@ function inboundSelector(preselect, opts) {
     const items = [];
     for (const rec of all) {
       const ib = rec.ib, node = rec.node;
+      if (String(ib.id || "").indexOf("__native_") === 0) continue;
       if (["socks", "http", "dokodemo-door"].includes(String(ib.protocol))) continue;
       const isBs = ib.id === "__bs_main__";
       const isWg = ib.id === "__wg__";
@@ -13067,7 +13005,8 @@ async function loadInbounds() {
       for (const ib of (n.inbounds || [])) remote.push(Object.assign({}, ib, { _node: { id: String(n.id), name: n.name || ("#" + n.id) }, _key: n.id + ":" + ib.id }));
     }
   } catch (e) { /* федерации может не быть — тихо */ }
-  INBOUNDS = local.concat(remote);
+  // Нативные __native_*-карточки больше не показываем (старые фед-ноды их ещё шлют).
+  INBOUNDS = local.concat(remote).filter((ib) => String(ib.id || "").indexOf("__native_") !== 0);
 }
 
 async function viewInbounds(p) {
@@ -13082,24 +13021,6 @@ async function viewInbounds(p) {
   renderInboundList();
 }
 
-function nativeInboundActions(ib) {
-  // Нативные (системные) инбаунды: правка через ГОТОВЫЕ модалки настроек ноды,
-  // удаление = выключить канал (reality/wscdn); основной удалить нельзя (база ноды).
-  const id = String(ib.id || "");
-  const pillTxt = ib.security === "reality" ? "reality" : (ib.network || "нативный");
-  const out = [el("span", { class: "pill on", html: '<span class="led on"></span>' + pillTxt })];
-  if (id === "__native_reality__") {
-    out.push(iconBtn("i-edit", "Изменить Reality (SNI / dest / порт / ключи)", (e) => { e.stopPropagation(); realityModal(); }));
-    out.push(iconBtn("i-trash", "Выключить Reality", (e) => { e.stopPropagation(); confirmModal("Выключить Reality?", "Клиенты этой ноды на канале Reality перестанут подключаться, пока не включишь обратно. Основной инбаунд и БС продолжат работать.", async () => { await api("/server/reality", { method: "POST", body: { off: true } }); toast("Reality выключен, xray перезапускается"); setTimeout(refreshInbounds, 2500); }, true); }, "danger"));
-  } else if (id === "__native_wscdn__") {
-    out.push(iconBtn("i-edit", "Настроить / выключить WS-CDN", (e) => { e.stopPropagation(); cdnWsModal(); }));
-  } else if (id === "__native_main__") {
-    out.push(iconBtn("i-edit", "Изменить транспорт / path основного инбаунда", (e) => { e.stopPropagation(); transportModal(); }));
-    out.push(iconBtn("i-net", "Изменить домен (host в ссылках)", (e) => { e.stopPropagation(); domainModal(); }));
-    out.push(iconBtn("i-trash", "Основной инбаунд удалить нельзя", (e) => { e.stopPropagation(); toast("Основной инбаунд — база ноды, его нельзя удалить. Меняй параметры карандашом или переключи транспорт.", true); }, "danger"));
-  }
-  return out;
-}
 function renderInboundList() {
   const host = $("inbHost");
   if (!host) return;
@@ -13130,7 +13051,9 @@ function renderInboundList() {
       ] : ib.id === "__wg__" ? [
         el("span", { class: "pill on", html: '<span class="led on"></span>WireGuard' }),
         iconBtn("i-trash", "Удалить (выключить WireGuard)", (e) => { e.stopPropagation(); inboundDeleteModal(ib); }, "danger"),
-      ] : (ib.system || String(ib.id || "").indexOf("__native_") === 0) ? nativeInboundActions(ib) : [
+      ] : ib.system ? [
+        el("span", { class: "pill on", html: '<span class="led on"></span>' + (ib.security === "reality" ? "reality" : (ib.network || "системный")) }),
+      ] : [
         iconBtn(ib.enabled ? "i-power" : "i-power", ib.enabled ? "Выключить" : "Включить", (e) => { e.stopPropagation(); toggleInbEnabled(ib); }),
         iconBtn("i-edit", "Изменить", (e) => { e.stopPropagation(); inboundEditModal(ib); }),
         iconBtn("i-trash", "Удалить", (e) => { e.stopPropagation(); inboundDeleteModal(ib); }, "danger"),
@@ -13563,7 +13486,7 @@ async function loadLinkedAggregate(aggBox) {
   const nodes = d.nodes || [];
   const allInb = [], allCli = [];
   for (const n of nodes) {
-    for (const ib of (n.inbounds || [])) allInb.push({ srv: n.name, ib });
+    for (const ib of (n.inbounds || [])) { if (String(ib.id || "").indexOf("__native_") === 0) continue; allInb.push({ srv: n.name, ib }); }
     for (const c of (n.clients || [])) allCli.push({ srv: n.name, c });
   }
   card.innerHTML = "";
@@ -15565,7 +15488,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_text(200, payload, "text/plain; charset=utf-8")
 
     def list_inbounds(self):
-        items = native_inbound_payloads() + [custom_inbound_payload(s) for s in load_custom_inbounds()]
+        items = [custom_inbound_payload(s) for s in load_custom_inbounds()]
         wg = wg_inbound_payload()
         if wg:
             items.insert(0, wg)
