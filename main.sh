@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-79"
+SCRIPT_VERSION="2026.08.02-panel-hacker-80"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -8204,6 +8204,9 @@ def shopbot_defaults():
         "platega_merchant_id": "",
         "platega_secret": "",
         "platega_methods": [],
+        "privacy_url": "",
+        "terms_url": "",
+        "offer_url": "",
         "shop_name": (NODE_NAME or "VPN Shop"),
         "support_url": "",
         "channel_url": "",
@@ -8440,6 +8443,9 @@ def shopbot_write_config(cfg):
         "plans": plans,
         "stars_per_rub": float(cfg.get("stars_per_rub") or 0.7),
         "platega_methods": (cfg.get("platega_methods") if isinstance(cfg.get("platega_methods"), list) else []),
+        "privacy_url": str(cfg.get("privacy_url") or "").strip(),
+        "terms_url": str(cfg.get("terms_url") or "").strip(),
+        "offer_url": str(cfg.get("offer_url") or "").strip(),
         "interface": (cfg.get("interface") if isinstance(cfg.get("interface"), dict) else {}),
     }
     with open(os.path.join(SHOPBOT_DIR, "config.yml"), "w", encoding="utf-8") as f:
@@ -12589,6 +12595,9 @@ function renderShopBot(box) {
     { name: "cryptobot_token", label: "Токен CryptoBot (необязательно)", value: cfg.cryptobot_token || "", ph: "пусто = крипта выключена" },
     { name: "platega_merchant_id", label: "Platega Merchant ID (необязательно)", value: cfg.platega_merchant_id || "", ph: "пусто = Platega выключена" },
     { name: "platega_secret", label: "Platega Secret", value: cfg.platega_secret || "", ph: "секретный ключ мерчанта Platega" },
+    { name: "privacy_url", label: "Документы · Политика конфиденциальности (ссылка)", value: cfg.privacy_url || "", ph: "https://telegra.ph/..." },
+    { name: "terms_url", label: "Документы · Пользовательское соглашение (ссылка)", value: cfg.terms_url || "", ph: "https://telegra.ph/..." },
+    { name: "offer_url", label: "Документы · Оферта / тарифы (необязательно)", value: cfg.offer_url || "", ph: "https://..." },
   ]);
   // Способы оплаты Platega — оператор включает то, что доступно в его мерчанте.
   const PG_METHODS = [
@@ -12606,12 +12615,12 @@ function renderShopBot(box) {
   });
   const pgBox = el("div", { style: "margin-top:16px;padding-top:14px;border-top:1px solid var(--line)" }, [
     el("div", { style: "font-size:11px;color:var(--mut);letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px", text: "Приём оплат · Platega" }),
-    el("div", { class: "mut", style: "margin:0 0 12px;font-size:12px", text: "Какие способы показывать покупателю. Кнопки появятся в боте после того, как выше заполнены Merchant ID и Secret." }),
+    el("div", { class: "mut", style: "margin:0 0 12px;font-size:12px", text: "Какие способы показывать покупателю. Кнопки появятся в боте после того, как выше заполнены Merchant ID и Secret. Ссылки на документы выше показываются в боте кнопкой «📄 Документы» (требование банка при приёме платежей)." }),
     el("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px" }, pgRows),
   ]);
   const saveBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить", onclick: async () => {
     const body = {};
-    for (const k of ["bot_token", "admin_ids", "shop_name", "support_url", "cryptobot_token", "platega_merchant_id", "platega_secret"]) body[k] = refs[k].value.trim();
+    for (const k of ["bot_token", "admin_ids", "shop_name", "support_url", "cryptobot_token", "platega_merchant_id", "platega_secret", "privacy_url", "terms_url", "offer_url"]) body[k] = refs[k].value.trim();
     body.platega_methods = PG_METHODS.filter((m) => pgChecks[m.slug].checked).map((m) => m.slug);
     if (!body.bot_token) return toast("Укажите токен бота", true);
     if (!body.admin_ids) return toast("Укажите ваш Telegram ID", true);
@@ -15280,7 +15289,8 @@ class Handler(BaseHTTPRequestHandler):
         if method in ("POST", "PATCH") and sub in ("", "config"):
             cfg = load_shopbot_cfg()
             for key in ("bot_token", "admin_ids", "cryptobot_token", "shop_name",
-                        "support_url", "channel_url", "platega_merchant_id", "platega_secret"):
+                        "support_url", "channel_url", "platega_merchant_id", "platega_secret",
+                        "privacy_url", "terms_url", "offer_url"):
                 if key in data:
                     cfg[key] = str(data.get(key) or "").strip()
             if isinstance(data.get("platega_methods"), list):
