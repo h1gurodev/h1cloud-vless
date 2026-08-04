@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-77"
+SCRIPT_VERSION="2026.08.02-panel-hacker-78"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -8201,6 +8201,9 @@ def shopbot_defaults():
         "bot_token": "",
         "admin_ids": "",
         "cryptobot_token": "",
+        "platega_merchant_id": "",
+        "platega_secret": "",
+        "platega_methods": [],
         "shop_name": (NODE_NAME or "VPN Shop"),
         "support_url": "",
         "channel_url": "",
@@ -8376,6 +8379,8 @@ def shopbot_write_config(cfg):
         "BOT_TOKEN=" + str(cfg.get("bot_token") or "").strip(),
         "ADMIN_IDS=" + str(cfg.get("admin_ids") or "").strip(),
         "CRYPTOBOT_TOKEN=" + str(cfg.get("cryptobot_token") or "").strip(),
+        "PLATEGA_MERCHANT_ID=" + str(cfg.get("platega_merchant_id") or "").strip(),
+        "PLATEGA_SECRET=" + str(cfg.get("platega_secret") or "").strip(),
         "DB_PATH=data/shop.db",
         "PUBLIC_BASE_URL=" + sub_base + "/sub",
         "CONFIG_PATH=config.yml",
@@ -8434,6 +8439,7 @@ def shopbot_write_config(cfg):
         }],
         "plans": plans,
         "stars_per_rub": float(cfg.get("stars_per_rub") or 0.7),
+        "platega_methods": (cfg.get("platega_methods") if isinstance(cfg.get("platega_methods"), list) else []),
         "interface": (cfg.get("interface") if isinstance(cfg.get("interface"), dict) else {}),
     }
     with open(os.path.join(SHOPBOT_DIR, "config.yml"), "w", encoding="utf-8") as f:
@@ -12581,10 +12587,32 @@ function renderShopBot(box) {
     { name: "shop_name", label: "Название магазина", value: cfg.shop_name || "", ph: "Neon VPN" },
     { name: "support_url", label: "Поддержка (ссылка, необязательно)", value: cfg.support_url || "", ph: "https://t.me/your_support" },
     { name: "cryptobot_token", label: "Токен CryptoBot (необязательно)", value: cfg.cryptobot_token || "", ph: "пусто = крипта выключена" },
+    { name: "platega_merchant_id", label: "Platega Merchant ID (необязательно)", value: cfg.platega_merchant_id || "", ph: "пусто = Platega выключена" },
+    { name: "platega_secret", label: "Platega Secret", value: cfg.platega_secret || "", ph: "секретный ключ мерчанта Platega" },
+  ]);
+  // Способы оплаты Platega — оператор включает то, что доступно в его мерчанте.
+  const PG_METHODS = [
+    { slug: "sbp", label: "🏦 СБП" },
+    { slug: "card", label: "💳 Карта РФ" },
+    { slug: "card_intl", label: "🌍 Зарубежная карта" },
+    { slug: "crypto", label: "🪙 Криптовалюта" },
+  ];
+  const pgEnabled = new Set((cfg.platega_methods || []).map((m) => (typeof m === "string" ? m : (m && m.slug))).filter(Boolean));
+  const pgChecks = {};
+  const pgRows = PG_METHODS.map((m) => {
+    const cb = el("input", { type: "checkbox" });
+    cb.checked = pgEnabled.has(m.slug);
+    pgChecks[m.slug] = cb;
+    return el("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [cb, el("span", { text: m.label })]);
+  });
+  const pgBox = el("div", {}, [
+    el("div", { class: "mut", style: "margin:4px 0 6px;font-size:12px", text: "Приём оплат Platega — какие способы показывать покупателю (заполните Merchant ID и Secret выше):" }),
+    el("div", { style: "display:flex;flex-direction:column;gap:6px" }, pgRows),
   ]);
   const saveBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить", onclick: async () => {
     const body = {};
-    for (const k of ["bot_token", "admin_ids", "shop_name", "support_url", "cryptobot_token"]) body[k] = refs[k].value.trim();
+    for (const k of ["bot_token", "admin_ids", "shop_name", "support_url", "cryptobot_token", "platega_merchant_id", "platega_secret"]) body[k] = refs[k].value.trim();
+    body.platega_methods = PG_METHODS.filter((m) => pgChecks[m.slug].checked).map((m) => m.slug);
     if (!body.bot_token) return toast("Укажите токен бота", true);
     if (!body.admin_ids) return toast("Укажите ваш Telegram ID", true);
     saveBtn.disabled = true;
@@ -12605,6 +12633,7 @@ function renderShopBot(box) {
   box.append(el("div", { class: "card" }, [
     el("h3", { text: "Подключение" }),
     wrap,
+    pgBox,
     el("div", { style: "margin-top:12px;display:flex;justify-content:flex-end;gap:10px;align-items:center" }, [
       el("small", { class: "mut", text: "Enter или кнопка →" }),
       saveBtn,
@@ -15250,9 +15279,34 @@ class Handler(BaseHTTPRequestHandler):
 
         if method in ("POST", "PATCH") and sub in ("", "config"):
             cfg = load_shopbot_cfg()
-            for key in ("bot_token", "admin_ids", "cryptobot_token", "shop_name", "support_url", "channel_url"):
+            for key in ("bot_token", "admin_ids", "cryptobot_token", "shop_name",
+                        "support_url", "channel_url", "platega_merchant_id", "platega_secret"):
                 if key in data:
                     cfg[key] = str(data.get(key) or "").strip()
+            if isinstance(data.get("platega_methods"), list):
+                _pg_known = {"sbp", "card", "card_intl", "crypto"}
+                _pg = []
+                _pg_seen = set()
+                for _m in data["platega_methods"]:
+                    _slug = ""
+                    _extra = {}
+                    if isinstance(_m, str):
+                        _slug = _m.strip()
+                    elif isinstance(_m, dict):
+                        _slug = str(_m.get("slug") or "").strip()
+                        _code = parse_int(_m.get("code"), 0)
+                        if _code > 0:
+                            _extra = {"slug": _slug, "code": _code,
+                                      "title": str(_m.get("title") or "").strip()[:40]}
+                    if not _slug or _slug in _pg_seen:
+                        continue
+                    if _slug in _pg_known:
+                        _pg.append(_slug)
+                        _pg_seen.add(_slug)
+                    elif _extra:
+                        _pg.append(_extra)
+                        _pg_seen.add(_slug)
+                cfg["platega_methods"] = _pg
             if "referral_percent" in data:
                 cfg["referral_percent"] = max(0, min(100, parse_int(data.get("referral_percent"), 0)))
             if "stars_per_rub" in data:
