@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-85"
+SCRIPT_VERSION="2026.08.04-panel-hacker-86"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -13424,6 +13424,7 @@ function renderInboundList() {
       el("td", { class: "actcell", style: "text-align:right;white-space:nowrap" }, ib.id === "__bs_main__" ? [
         el("span", { class: "pill on", html: '<span class="led on"></span>обход БС' }),
         iconBtn("i-edit", "Переименовать", (e) => { e.stopPropagation(); bsRenameModal(ib); }),
+        iconBtn("i-trash", "Выключить обход", (e) => { e.stopPropagation(); confirmModal("Выключить обход (БС)", "Обход-инбаунд будет удалён с ноды. Новые клиенты перестанут получать его в подписке, у существующих БС-конфиг пропадёт. Остальные инбаунды не затрагиваются. Продолжить?", async () => { await api("/server/cdn-xhttp", { method: "POST", body: { off: true } }); toast("Обход выключен, xray перезапускается"); setTimeout(refreshInbounds, 2500); }, true); }, "danger"),
       ] : ib.id === "__wg__" ? [
         el("span", { class: "pill on", html: '<span class="led on"></span>WireGuard' }),
         iconBtn("i-trash", "Удалить (выключить WireGuard)", (e) => { e.stopPropagation(); inboundDeleteModal(ib); }, "danger"),
@@ -15024,6 +15025,16 @@ class Handler(BaseHTTPRequestHandler):
     def configure_cdn_xhttp(self, users, data):
         global TRANSPORT, XHTTP_PATH, XHTTP_METHOD
         global CDN_XHTTP_ENABLED, CDN_XHTTP_HOST, CDN_XHTTP_SNI, CDN_XHTTP_PORT, CDN_XHTTP_TAG, CDN_XHTTP_PUBLIC_PATH
+
+        # Выключение обхода (БС): xray перестаёт поднимать обход-инбаунд, из подписок
+        # клиентов пропадает БС-конфиг. Остальные инбаунды не затрагиваются.
+        if str(first_value(data, "off", "disable", "clear")).lower() in ("1", "true", "yes", "on"):
+            atomic_text(CDN_XHTTP_ENABLED_FILE, "0\n")
+            CDN_XHTTP_ENABLED = False
+            atomic_text(XRAY_RESTART_REQUEST_FILE, "api_cdn_xhttp_off %d" % now_ts())
+            log_action("api_cdn_xhttp_off", "")
+            self.send_json(200, {"ok": True, "cdn_xhttp": {"enabled": False}, "restart": "requested"})
+            return
 
         cdn_host = normalize_host(first_value(data, "cdn_host", "host", "address"))
         sni = normalize_host(first_value(data, "sni", "server_name")) or cdn_host
