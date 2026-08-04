@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-84"
+SCRIPT_VERSION="2026.08.04-panel-hacker-85"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -15758,9 +15758,10 @@ class Handler(BaseHTTPRequestHandler):
                 except FileNotFoundError:
                     pass
             did.append("format")
-        atomic_text(SUB_RESTART_REQUEST_FILE, "api_sub_remark %d" % now_ts())
+        # Рестарт НЕ нужен: формат/название ноды читаются из файла при каждой отдаче
+        # подписки (client_remark → _sub_remark_format/_sub_node_label). Применяется сразу.
         log_action("api_sub_remark", " ".join(did) or "noop")
-        self.send_json(200, {"ok": True, "subscription": {"remark_format": _sub_remark_format(), "node_label": _sub_node_label()}, "restart": "requested"})
+        self.send_json(200, {"ok": True, "subscription": {"remark_format": _sub_remark_format(), "node_label": _sub_node_label()}, "restart": "not_needed"})
 
     def configure_server_port(self, users, data):
         """Смена порта сервиса (api|sub|reality) на один из ВЫДЕЛЕННЫХ портов сервера.
