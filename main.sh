@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-83"
+SCRIPT_VERSION="2026.08.04-panel-hacker-84"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -6779,11 +6779,22 @@ def _apply_remark_format(fmt, name, node, label):
     return out or name
 
 
+def _sub_node_label():
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), "sub_node_label.txt")
+        with open(_p, "r", encoding="utf-8") as _f:
+            _v = _f.read().strip()
+        if _v:
+            return _v
+    except Exception:
+        pass
+    return str(NODE_NAME or "").strip() or read_domain()
+
+
 def client_remark(name, label):
     name = str(name or "").strip() or "client"
     label = str(label or "").strip()
-    node = str(NODE_NAME or "").strip() or read_domain()
-    return _apply_remark_format(_sub_remark_format(), name, node, label)
+    return _apply_remark_format(_sub_remark_format(), name, _sub_node_label(), label)
 
 
 def user_channels(user):
@@ -9447,6 +9458,7 @@ def status_payload(users):
             "port": SUB_PORT,
             "name": SUB_NAME,
             "remark_format": _sub_remark_format(),
+            "node_label": _sub_node_label(),
             "auth": "uuid_path",
             "legacy_token_enabled": bool(SUB_TOKEN),
         },
@@ -12499,8 +12511,25 @@ function viewSubscription(p) {
     nameInp,
     el("div", { style: "margin-top:10px;display:flex;justify-content:flex-end" }, [nameBtn]),
   ]));
+  // Название ноды (значение плейсхолдера {node})
+  const nodeInp = el("input", { value: sub.node_label || "", placeholder: "🇫🇮 Финляндия", maxlength: "60" });
+  const nodeBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить" });
+  nodeBtn.onclick = async () => {
+    nodeBtn.disabled = true;
+    try {
+      const v = nodeInp.value.trim();
+      await api("/server/sub-remark", { method: "POST", body: v ? { node_label: v } : { clear_node: true } });
+      toast("Название ноды сохранено, применяется"); setTimeout(refresh, 2500);
+    } catch (e) { toast(e.message, true); } finally { nodeBtn.disabled = false; }
+  };
+  p.append(el("div", { class: "card" }, [
+    el("h3", { text: "Название ноды (локация)" }),
+    el("p", { class: "mut", style: "margin:0 0 10px;font-size:12px", html: "Значение плейсхолдера <code>{node}</code> в имени конфига. Можно с флагом-эмодзи, напр. <b>🇫🇮 Финляндия</b>. Пусто — подставится адрес ноды." }),
+    nodeInp,
+    el("div", { style: "margin-top:10px;display:flex;justify-content:flex-end" }, [nodeBtn]),
+  ]));
   // Формат имени конфига (remark)
-  const nodeEx = s.node_name || "Финка";
+  const nodeEx = sub.node_label || s.node_name || "Финляндия";
   const cur = sub.remark_format || "{name} · {label}";
   const fmtInp = el("input", { value: cur, maxlength: "120", style: "font-family:monospace" });
   const preview = el("div", { class: "mut", style: "margin-top:8px;font-size:13px" });
@@ -15695,24 +15724,43 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(200, {"ok": True, "subscription": {"name": name}, "restart": "requested"})
 
     def configure_sub_remark(self, users, data):
-        # Формат имени конфига в подписке (remark после #). Плейсхолдеры {name}/{node}/{label}.
-        _p = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), "sub_remark_format.txt")
-        clear = str(first_value(data, "clear", "off")).lower() in ("1", "true", "yes", "on")
-        fmt = strip_outer_quotes(str(first_value(data, "format", "remark", "remark_format") or "").strip())
-        if clear or not fmt:
-            try:
-                os.remove(_p)
-            except FileNotFoundError:
-                pass
-            atomic_text(SUB_RESTART_REQUEST_FILE, "api_sub_remark_clear %d" % now_ts())
-            log_action("api_sub_remark_clear", "")
-            self.send_json(200, {"ok": True, "subscription": {"remark_format": "{name} · {label}"}, "restart": "requested"})
-            return
-        fmt = fmt.replace(chr(13), " ").replace(chr(10), " ").replace(chr(9), " ")[:120].strip()
-        atomic_text(_p, fmt + chr(10))
+        # Настройки отображения подписки: формат имени конфига ({name}/{node}/{label})
+        # и «Название ноды» (значение плейсхолдера {node}). Оба поля независимы и опциональны.
+        _dir = os.path.dirname(os.path.abspath(CONFIG_FILE))
+        did = []
+        # --- Название ноды (для {node}) ---
+        _nl_raw = first_value(data, "node_label", "node_name")
+        _nl_clear = str(first_value(data, "clear_node")).lower() in ("1", "true", "yes", "on")
+        if _nl_raw != "" or _nl_clear:
+            _pn = os.path.join(_dir, "sub_node_label.txt")
+            nl = strip_outer_quotes(str(_nl_raw or "").strip())
+            nl = nl.replace(chr(13), " ").replace(chr(10), " ").replace(chr(9), " ")[:60].strip()
+            if nl and not _nl_clear:
+                atomic_text(_pn, nl + chr(10))
+            else:
+                try:
+                    os.remove(_pn)
+                except FileNotFoundError:
+                    pass
+            did.append("node_label")
+        # --- Формат имени конфига ---
+        _fmt_raw = first_value(data, "format", "remark", "remark_format")
+        _fmt_clear = str(first_value(data, "clear", "off")).lower() in ("1", "true", "yes", "on")
+        if _fmt_raw != "" or _fmt_clear:
+            _p = os.path.join(_dir, "sub_remark_format.txt")
+            fmt = strip_outer_quotes(str(_fmt_raw or "").strip())
+            if fmt and not _fmt_clear:
+                fmt = fmt.replace(chr(13), " ").replace(chr(10), " ").replace(chr(9), " ")[:120].strip()
+                atomic_text(_p, fmt + chr(10))
+            else:
+                try:
+                    os.remove(_p)
+                except FileNotFoundError:
+                    pass
+            did.append("format")
         atomic_text(SUB_RESTART_REQUEST_FILE, "api_sub_remark %d" % now_ts())
-        log_action("api_sub_remark", fmt)
-        self.send_json(200, {"ok": True, "subscription": {"remark_format": fmt}, "restart": "requested"})
+        log_action("api_sub_remark", " ".join(did) or "noop")
+        self.send_json(200, {"ok": True, "subscription": {"remark_format": _sub_remark_format(), "node_label": _sub_node_label()}, "restart": "requested"})
 
     def configure_server_port(self, users, data):
         """Смена порта сервиса (api|sub|reality) на один из ВЫДЕЛЕННЫХ портов сервера.
@@ -17645,10 +17693,23 @@ def _sub_remark_format():
         return "{name} · {label}"
 
 
+def _sub_node_label():
+    import os as _os
+    try:
+        _p = _os.path.join(_os.path.dirname(_os.path.abspath(USERS_FILE)), "sub_node_label.txt")
+        with open(_p, "r", encoding="utf-8") as _f:
+            _v = _f.read().strip()
+        if _v:
+            return _v
+    except Exception:
+        pass
+    return str(NODE_NAME or "").strip()
+
+
 def client_remark(name, label):
     name = str(name or "").strip() or "client"
     label = str(label or "").strip()
-    node = str(NODE_NAME or "").strip()
+    node = _sub_node_label()
     fmt = _sub_remark_format()
     try:
         out = fmt.replace("{name}", name).replace("{node}", node).replace("{label}", label)
