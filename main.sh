@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-82"
+SCRIPT_VERSION="2026.08.04-panel-hacker-83"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -15929,7 +15929,31 @@ class Handler(BaseHTTPRequestHandler):
         blob = "\n".join(links)
         import base64 as _b
         payload = _b.b64encode(blob.encode("utf-8")).decode("ascii")
-        self.send_text(200, payload, "text/plain; charset=utf-8")
+        body = payload.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/plain; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        # Имя профиля в приложении (Happ/v2rayTun и т.д.) — из «Название подписки».
+        _title = str(SUB_NAME or "").strip()
+        if _title:
+            self.send_header("Profile-Title", "base64:" + _b.b64encode(_title.encode("utf-8")).decode("ascii"))
+        self.send_header("Profile-Update-Interval", "12")
+        # Срок действия + трафик — приложение показывает их в карточке подписки.
+        try:
+            _exp = int(target.get("expires_at", 0) or 0)
+            _tr = load_traffic().get(str(target.get("uuid", "")), {}) or {}
+            _used = int(_tr.get("used_bytes", 0) or 0)
+            _limit = int(target.get("traffic_limit_bytes", 0) or 0)
+            _ui = ["upload=0", "download=%d" % _used]
+            if _limit > 0:
+                _ui.append("total=%d" % _limit)
+            if 0 < _exp < 4102444800:
+                _ui.append("expire=%d" % _exp)
+            self.send_header("Subscription-Userinfo", "; ".join(_ui))
+        except Exception:
+            pass
+        self.end_headers()
+        self.wfile.write(body)
 
     def list_inbounds(self):
         items = [custom_inbound_payload(s) for s in load_custom_inbounds()]
