@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.02-panel-hacker-78"
+SCRIPT_VERSION="2026.08.02-panel-hacker-79"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -12600,14 +12600,14 @@ function renderShopBot(box) {
   const pgEnabled = new Set((cfg.platega_methods || []).map((m) => (typeof m === "string" ? m : (m && m.slug))).filter(Boolean));
   const pgChecks = {};
   const pgRows = PG_METHODS.map((m) => {
-    const cb = el("input", { type: "checkbox" });
-    cb.checked = pgEnabled.has(m.slug);
+    const { cb, row } = checkRow(m.label, pgEnabled.has(m.slug));
     pgChecks[m.slug] = cb;
-    return el("label", { style: "display:flex;align-items:center;gap:8px;cursor:pointer" }, [cb, el("span", { text: m.label })]);
+    return row;
   });
-  const pgBox = el("div", {}, [
-    el("div", { class: "mut", style: "margin:4px 0 6px;font-size:12px", text: "Приём оплат Platega — какие способы показывать покупателю (заполните Merchant ID и Secret выше):" }),
-    el("div", { style: "display:flex;flex-direction:column;gap:6px" }, pgRows),
+  const pgBox = el("div", { style: "margin-top:16px;padding-top:14px;border-top:1px solid var(--line)" }, [
+    el("div", { style: "font-size:11px;color:var(--mut);letter-spacing:.16em;text-transform:uppercase;margin-bottom:6px", text: "Приём оплат · Platega" }),
+    el("div", { class: "mut", style: "margin:0 0 12px;font-size:12px", text: "Какие способы показывать покупателю. Кнопки появятся в боте после того, как выше заполнены Merchant ID и Secret." }),
+    el("div", { style: "display:grid;grid-template-columns:1fr 1fr;gap:8px" }, pgRows),
   ]);
   const saveBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить", onclick: async () => {
     const body = {};
