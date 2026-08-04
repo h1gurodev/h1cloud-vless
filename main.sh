@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-81"
+SCRIPT_VERSION="2026.08.04-panel-hacker-82"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -6753,15 +6753,37 @@ def build_egress_config(egress_xray_link):
     return (outbounds, routing)
 
 
-# Человекочитаемые ярлыки способов подключения — идут в remark ссылки (после #),
-# чтобы в приложении профиль назывался «имя · способ», а не «нода/CDN».
+# Человекочитаемые ярлыки способов подключения — идут в remark ссылки (после #).
+# Формат имени конфига настраивается оператором (вкладка «Подписка»):
+# плейсхолдеры {name} — имя клиента, {node} — название ноды, {label} — способ.
 CHANNEL_LABELS = {"main": "VLESS", "reality": "Reality", "bs": "БС", "wscdn": "WS-CDN"}
+
+
+def _sub_remark_format():
+    try:
+        _p = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), "sub_remark_format.txt")
+        with open(_p, "r", encoding="utf-8") as _f:
+            _v = _f.read().strip()
+        return _v or "{name} · {label}"
+    except Exception:
+        return "{name} · {label}"
+
+
+def _apply_remark_format(fmt, name, node, label):
+    try:
+        out = fmt.replace("{name}", name).replace("{node}", node).replace("{label}", label)
+    except Exception:
+        out = (name + " · " + label) if label else name
+    out = out.replace("  ", " ").strip()
+    out = out.strip(" ·-|/").strip()
+    return out or name
 
 
 def client_remark(name, label):
     name = str(name or "").strip() or "client"
     label = str(label or "").strip()
-    return (name + " · " + label) if label else name
+    node = str(NODE_NAME or "").strip() or read_domain()
+    return _apply_remark_format(_sub_remark_format(), name, node, label)
 
 
 def user_channels(user):
@@ -9424,6 +9446,7 @@ def status_payload(users):
             "public_host": SUB_PUBLIC_HOST,
             "port": SUB_PORT,
             "name": SUB_NAME,
+            "remark_format": _sub_remark_format(),
             "auth": "uuid_path",
             "legacy_token_enabled": bool(SUB_TOKEN),
         },
@@ -11365,6 +11388,7 @@ const NAV = [
   { id: "dash", label: "Обзор", icon: "i-dash" },
   { id: "clients", label: "Клиенты", icon: "i-users" },
   { id: "inbounds", label: "Инбаунды", icon: "i-chip" },
+  { id: "subscription", label: "Подписка", icon: "i-box" },
   { id: "settings", label: "Настройки", icon: "i-gear" },
   { id: "domains", label: "Домены", icon: "i-net" },
   { id: "federation", label: "Серверы", icon: "i-fed" },
@@ -11426,7 +11450,7 @@ function render() {
   const p = $("page");
   p.innerHTML = "";
   if (FED_NODE) p.append(fedBanner());
-  ({ dash: viewDash, clients: viewClients, inbounds: viewInbounds, settings: viewSettings,
+  ({ dash: viewDash, clients: viewClients, inbounds: viewInbounds, subscription: viewSubscription, settings: viewSettings,
      domains: viewDomains, federation: viewFederation, shopbot: viewShopBot, migrate: viewMigrate, backups: viewBackups, logs: viewLogs }[state.view] || viewDash)(p);
 }
 
@@ -12445,6 +12469,66 @@ function portMovedModal(newUrl) {
     footer: [el("button", { class: "primary", text: "Перейти сейчас", onclick: () => { location.href = newUrl; } })],
   });
 }
+const REMARK_PRESETS = [
+  { fmt: "{name} · {label}", label: "Имя клиента · способ" },
+  { fmt: "{node} · {label}", label: "Нода · способ" },
+  { fmt: "{node}", label: "Только нода" },
+  { fmt: "{name}", label: "Только имя клиента" },
+  { fmt: "{name} · {node}", label: "Имя клиента · нода" },
+];
+function viewSubscription(p) {
+  const s = STATUS || {}, sub = s.subscription || {};
+  p.append(el("div", { class: "vhead" }, [
+    el("div", {}, [el("h2", { text: "Подписка" }),
+      el("p", { class: "mut", text: "Как называется подписка в приложении и как подписываются отдельные конфиги в списке." })]),
+  ]));
+  // Название подписки (заголовок профиля в приложении)
+  const nameInp = el("input", { value: sub.name || "", placeholder: "напр. My VPN", maxlength: "64" });
+  const nameBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить" });
+  nameBtn.onclick = async () => {
+    nameBtn.disabled = true;
+    try {
+      const v = nameInp.value.trim();
+      await api("/server/sub-name", { method: "POST", body: v ? { name: v } : { clear: true } });
+      toast("Название подписки сохранено, применяется"); setTimeout(refresh, 2500);
+    } catch (e) { toast(e.message, true); } finally { nameBtn.disabled = false; }
+  };
+  p.append(el("div", { class: "card" }, [
+    el("h3", { text: "Название подписки" }),
+    el("p", { class: "mut", style: "margin:0 0 10px;font-size:12px", text: "Заголовок профиля в приложении (Happ, v2rayTun и т.д.). Пусто — приложение покажет своё." }),
+    nameInp,
+    el("div", { style: "margin-top:10px;display:flex;justify-content:flex-end" }, [nameBtn]),
+  ]));
+  // Формат имени конфига (remark)
+  const nodeEx = s.node_name || "Финка";
+  const cur = sub.remark_format || "{name} · {label}";
+  const fmtInp = el("input", { value: cur, maxlength: "120", style: "font-family:monospace" });
+  const preview = el("div", { class: "mut", style: "margin-top:8px;font-size:13px" });
+  const renderPrev = () => {
+    let out = (fmtInp.value || "{name} · {label}");
+    out = out.split("{name}").join("Иван").split("{node}").join(nodeEx).split("{label}").join("Reality");
+    out = out.split(" · · ").join(" · ").trim();
+    preview.textContent = "Пример: " + (out || "Иван");
+  };
+  fmtInp.addEventListener("input", renderPrev);
+  const presets = el("div", { style: "display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px" },
+    REMARK_PRESETS.map((pr) => el("button", { class: "ghost", text: pr.label, onclick: () => { fmtInp.value = pr.fmt; renderPrev(); } })));
+  const fmtBtn = el("button", { class: "primary", html: svg("i-down") + "Сохранить формат" });
+  fmtBtn.onclick = async () => {
+    fmtBtn.disabled = true;
+    try {
+      await api("/server/sub-remark", { method: "POST", body: { format: fmtInp.value.trim() } });
+      toast("Формат сохранён, применяется"); setTimeout(refresh, 2500);
+    } catch (e) { toast(e.message, true); } finally { fmtBtn.disabled = false; }
+  };
+  renderPrev();
+  p.append(el("div", { class: "card" }, [
+    el("h3", { text: "Имя конфигов в приложении" }),
+    el("p", { class: "mut", style: "margin:0 0 10px;font-size:12px", html: "Как подписан каждый конфиг в списке приложения. Плейсхолдеры: <code>{name}</code> — имя клиента, <code>{node}</code> — название ноды, <code>{label}</code> — способ (VLESS / Reality / БС)." }),
+    presets, fmtInp, preview,
+    el("div", { style: "margin-top:10px;display:flex;justify-content:flex-end" }, [fmtBtn]),
+  ]));
+}
 function viewSettings(p) {
   const s = STATUS || {};
   const rt = s.reality || {}, sub = s.subscription || {}, up = s.update || {}, ws = s.ws || {};
@@ -13401,6 +13485,12 @@ function selectEl(options, value) {
   return s;
 }
 
+function inbErr(e) {
+  return ({ tag_exists: "Инбаунд с таким названием уже есть — выберите другое имя",
+    port_conflict: "Порт занят другим сервисом", bad_port: "Некорректный порт",
+    bad_protocol: "Неизвестный протокол", bad_network: "Неизвестный транспорт",
+    bad_security: "Неизвестная защита" }[e.message] || e.message);
+}
 function inboundCreateModal() {
   const protoSel = selectEl(PROTOS, "vless");
   const netSel = selectEl(NETWORKS, "tcp");
@@ -13554,7 +13644,7 @@ function inboundCreateModal() {
       refreshInbounds();
       setTimeout(refreshInbounds, 2500);
       setTimeout(refreshInbounds, 6000);
-    } catch (e) { toast(e.message, true); btn.disabled = false; }
+    } catch (e) { toast(inbErr(e), true); btn.disabled = false; }
   } });
   modal({ title: "Новый инбаунд",
     body: [
@@ -13624,7 +13714,7 @@ function inboundEditModal(ib) {
     body.stream = stream;
     btn.disabled = true;
     try { await api("/inbounds/" + ib.id, ibOpts(ib, { method: "PATCH", body })); closeModal(); toast("Инбаунд обновлён, xray перезапускается"); setTimeout(refreshInbounds, 2500); }
-    catch (e) { toast(e.message, true); btn.disabled = false; }
+    catch (e) { toast(inbErr(e), true); btn.disabled = false; }
   } });
   modal({ title: "Инбаунд · " + ib.tag, body: [wrap, ...extra], footer: [el("button", { class: "ghost", text: "Отмена", onclick: closeModal }), btn] });
 }
@@ -14659,6 +14749,9 @@ class Handler(BaseHTTPRequestHandler):
             if sub in ("sub-name", "subscription-name", "subname"):
                 self.configure_sub_name(users, data)
                 return
+            if sub in ("sub-remark", "subscription-remark", "remark"):
+                self.configure_sub_remark(users, data)
+                return
             if sub in ("panel-credentials", "panel-login", "credentials"):
                 self.configure_panel_credentials(users, data)
                 return
@@ -15601,6 +15694,26 @@ class Handler(BaseHTTPRequestHandler):
         log_action("api_sub_name", name)
         self.send_json(200, {"ok": True, "subscription": {"name": name}, "restart": "requested"})
 
+    def configure_sub_remark(self, users, data):
+        # Формат имени конфига в подписке (remark после #). Плейсхолдеры {name}/{node}/{label}.
+        _p = os.path.join(os.path.dirname(os.path.abspath(CONFIG_FILE)), "sub_remark_format.txt")
+        clear = str(first_value(data, "clear", "off")).lower() in ("1", "true", "yes", "on")
+        fmt = strip_outer_quotes(str(first_value(data, "format", "remark", "remark_format") or "").strip())
+        if clear or not fmt:
+            try:
+                os.remove(_p)
+            except FileNotFoundError:
+                pass
+            atomic_text(SUB_RESTART_REQUEST_FILE, "api_sub_remark_clear %d" % now_ts())
+            log_action("api_sub_remark_clear", "")
+            self.send_json(200, {"ok": True, "subscription": {"remark_format": "{name} · {label}"}, "restart": "requested"})
+            return
+        fmt = fmt.replace(chr(13), " ").replace(chr(10), " ").replace(chr(9), " ")[:120].strip()
+        atomic_text(_p, fmt + chr(10))
+        atomic_text(SUB_RESTART_REQUEST_FILE, "api_sub_remark %d" % now_ts())
+        log_action("api_sub_remark", fmt)
+        self.send_json(200, {"ok": True, "subscription": {"remark_format": fmt}, "restart": "requested"})
+
     def configure_server_port(self, users, data):
         """Смена порта сервиса (api|sub|reality) на один из ВЫДЕЛЕННЫХ портов сервера.
 
@@ -15975,6 +16088,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(409, {"ok": False, "error": "port_conflict"})
                 return
             items = load_custom_inbounds()
+            _newtag = str(spec.get("tag") or "").strip().lower()
+            if _newtag and any(str(s.get("tag") or "").strip().lower() == _newtag for s in items):
+                self.send_json(409, {"ok": False, "error": "tag_exists"})
+                return
             items.append(spec)
             save_custom_inbounds(items)
         atomic_text(XRAY_RESTART_REQUEST_FILE, f"api_inbound_create {now_ts()}\n")
@@ -16074,6 +16191,10 @@ class Handler(BaseHTTPRequestHandler):
             target["port"] = new_port
         tag = strip_outer_quotes(str(first_value(data, "tag") or "").strip())
         if tag:
+            _t = tag.strip().lower()
+            if any(s.get("id") != iid and str(s.get("tag") or "").strip().lower() == _t for s in items):
+                self.send_json(409, {"ok": False, "error": "tag_exists"})
+                return
             target["tag"] = tag
         # Полное редактирование: протокол / транспорт / безопасность / метод SS.
         new_proto = str(first_value(data, "protocol") or "").strip().lower()
@@ -17485,14 +17606,32 @@ def merge_links(*groups):
     return result
 
 
-# --- выбор каналов + remark «имя · способ» (подписочный сервер, отдельное пространство имён) ---
+# --- выбор каналов + remark (подписочный сервер, отдельное пространство имён) ---
 CHANNEL_LABELS = {"main": "VLESS", "reality": "Reality", "bs": "БС", "wscdn": "WS-CDN"}
+
+
+def _sub_remark_format():
+    import os as _os
+    try:
+        _p = _os.path.join(_os.path.dirname(_os.path.abspath(USERS_FILE)), "sub_remark_format.txt")
+        with open(_p, "r", encoding="utf-8") as _f:
+            _v = _f.read().strip()
+        return _v or "{name} · {label}"
+    except Exception:
+        return "{name} · {label}"
 
 
 def client_remark(name, label):
     name = str(name or "").strip() or "client"
     label = str(label or "").strip()
-    return (name + " · " + label) if label else name
+    node = str(NODE_NAME or "").strip()
+    fmt = _sub_remark_format()
+    try:
+        out = fmt.replace("{name}", name).replace("{node}", node).replace("{label}", label)
+    except Exception:
+        out = (name + " · " + label) if label else name
+    out = out.replace("  ", " ").strip().strip(" ·-|/").strip()
+    return out or name
 
 
 def user_channels(user):
