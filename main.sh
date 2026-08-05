@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-86"
+SCRIPT_VERSION="2026.08.04-panel-hacker-87"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -12613,7 +12613,7 @@ function webDomainRow(d) {
 async function viewDomains(p) {
   p.append(el("div", { class: "vhead" }, [
     el("div", {}, [el("h2", { text: "Домены" }),
-      el("p", { class: "mut", text: "Свой домен для панели и подписки. SSL (Let's Encrypt) выдаётся автоматически — как в Pterodactyl." })]),
+      el("p", { class: "mut", text: "Свой домен для панели, подписки и Mini App (WebApp). SSL (Let's Encrypt) выдаётся автоматически — как в Pterodactyl." })]),
     el("button", { class: "primary", html: svg("i-plus") + "Добавить домен", onclick: () => addWebDomainModal() }),
   ]));
   const box = el("div", {}, [el("div", { class: "empty", text: "Загрузка…" })]);
@@ -12635,6 +12635,33 @@ async function viewDomains(p) {
   const grid = el("div", { class: "grid1" }, []);
   for (const d of doms) grid.append(webDomainRow(d));
   box.append(grid);
+
+  // Mini App (WebApp) — где живёт и как привязывается. Работает на любом домене
+  // с активным SSL (назначение «Подписка», «Панель» или оба).
+  const activeDomain = doms.find((d) => (d.ssl_status || (d.ssl ? "pending" : "not_issued")) === "active");
+  const pendingDomain = doms.find((d) => d.ssl && (d.ssl_status || "pending") !== "active");
+  if (activeDomain) {
+    const base = "https://" + activeDomain.domain;
+    box.append(el("div", { class: "card" }, [
+      el("h3", { text: "📱 Mini App и адреса на домене" }),
+      el("p", { class: "mut", style: "margin:0 0 10px;font-size:12px", html: "SSL активен — ваш Mini App (WebApp) <b>уже подключён</b>. Кнопка «WebApp» в боте открывает именно этот адрес, отдельно в @BotFather ничего настраивать не нужно." }),
+      el("dl", { class: "kv" }, [
+        el("dt", { text: "📱 Mini App" }), el("dd", {}, [el("a", { href: base + "/webapp", target: "_blank", rel: "noreferrer", text: base + "/webapp" })]),
+        el("dt", { text: "🖥 Панель" }), el("dd", {}, [el("a", { href: base + "/panel", target: "_blank", rel: "noreferrer", text: base + "/panel" })]),
+        el("dt", { text: "🔗 Подписка" }), el("dd", {}, [el("code", { text: base + "/sub/<uuid>" })]),
+      ]),
+    ]));
+  } else if (pendingDomain) {
+    box.append(el("div", { class: "card soft" }, [
+      el("h3", { text: "📱 Mini App" }),
+      el("p", { class: "mut", style: "margin:0", html: "Домен добавлен — идёт выдача SSL. Как только статус станет <b>«SSL активен»</b>, Mini App автоматически заработает на <code>https://" + esc(pendingDomain.domain) + "/webapp</code> и кнопка в боте начнёт его открывать." }),
+    ]));
+  } else {
+    box.append(el("div", { class: "card soft" }, [
+      el("h3", { text: "📱 Mini App (WebApp)" }),
+      el("p", { class: "mut", style: "margin:0", html: "Чтобы Mini App открывался на вашем адресе: <b>1)</b> создайте A-запись домена на IP выше, <b>2)</b> нажмите «Добавить домен» и дождитесь SSL. После этого Mini App включится сам на <code>https://ваш-домен/webapp</code> — бот будет открывать его автоматически." }),
+    ]));
+  }
   box.append(settingCard("Host в конфигах клиентов", "Адрес, который подставляется в сами vless-ссылки (не панель и не подписка).",
     [["Host", (STATUS || {}).domain || "—"]],
     [el("button", { html: svg("i-edit") + "Изменить", onclick: domainModal })]));
@@ -12827,13 +12854,19 @@ function renderShopBot(box) {
     obj: wa, title: "Веб-приложение (Mini App)",
     desc: "Синяя кнопка Menu слева от поля ввода в боте — открывает магазин внутри Telegram.",
     fallbackPrice: 5000, contact, moduleKey: "webapp", box,
-    extra: el("button", { class: "blue", html: svg("i-out") + "WebApp", title: "Открыть страницу приложения",
-      onclick: () => window.open(webappUrl, "_blank") }),
+    extra: (() => {
+      const kids = [el("button", { class: "blue", html: svg("i-out") + "WebApp", title: "Открыть страницу приложения",
+        onclick: () => window.open(webappUrl, "_blank") })];
+      if (!wa.own_domain)
+        kids.push(el("button", { class: "primary", html: svg("i-net") + "Привязать свой домен",
+          onclick: () => go("domains") }));
+      return el("div", { style: "display:flex;gap:10px;flex-wrap:wrap" }, kids);
+    })(),
     note: el("p", { class: "mut", style: "margin:10px 0 0", html:
       "Кнопка Menu в боте ведёт на <code>" + esc(wa.public_url || "") + "</code>." +
       (wa.own_domain
-        ? ""
-        : " Это общая витрина. После покупки привяжите свой домен во вкладке «Домены» — бот начнёт открывать ваше приложение.") }),
+        ? " Это ваш домен — Mini App открывается на нём."
+        : " Сейчас это общая витрина H1Cloud. Чтобы бот открывал <b>ваше</b> приложение: во вкладке «Домены» добавьте свой домен (A-запись на IP ноды) и дождитесь SSL — Mini App подключится сам, ничего в @BotFather настраивать не нужно.") }),
   }));
 
   box.append(el("div", { class: "card soft" }, [
