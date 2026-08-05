@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-88"
+SCRIPT_VERSION="2026.08.04-panel-hacker-89"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -15626,7 +15626,9 @@ class Handler(BaseHTTPRequestHandler):
         global REALITY_PUBLIC_HOST
         url, key = billing_config()
         try:
-            my_ip = read_first_line(PUBLIC_IP_FILE).strip()
+            # public_ip.txt может быть пуст (не записан при установке) — тогда берём
+            # адрес ноды (read_domain), на этих серверах это и есть их IP.
+            my_ip = read_first_line(PUBLIC_IP_FILE).strip() or read_domain().strip()
         except Exception:
             my_ip = ""
         if method == "GET":
