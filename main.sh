@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-87"
+SCRIPT_VERSION="2026.08.04-panel-hacker-88"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -12659,7 +12659,7 @@ async function viewDomains(p) {
   } else {
     box.append(el("div", { class: "card soft" }, [
       el("h3", { text: "📱 Mini App (WebApp)" }),
-      el("p", { class: "mut", style: "margin:0", html: "Чтобы Mini App открывался на вашем адресе: <b>1)</b> создайте A-запись домена на IP выше, <b>2)</b> нажмите «Добавить домен» и дождитесь SSL. После этого Mini App включится сам на <code>https://ваш-домен/webapp</code> — бот будет открывать его автоматически." }),
+      el("p", { class: "mut", style: "margin:0", html: "Чтобы Mini App открывался на вашем адресе: <b>1)</b> создайте A-запись домена на IP этой ноды <code>" + esc(data.public_ip || "—") + "</code>, <b>2)</b> нажмите «Добавить домен» и дождитесь SSL. После этого Mini App включится сам на <code>https://ваш-домен/webapp</code> — бот будет открывать его автоматически." }),
     ]));
   }
   box.append(settingCard("Host в конфигах клиентов", "Адрес, который подставляется в сами vless-ссылки (не панель и не подписка).",
