@@ -4,7 +4,7 @@ set +e
 export PYTHONUNBUFFERED=1
 export PYTHONIOENCODING=UTF-8
 
-SCRIPT_VERSION="2026.08.04-panel-hacker-89"
+SCRIPT_VERSION="2026.08.05-panel-hacker-90"
 export SCRIPT_VERSION
 DEFAULT_UPDATE_URL="https://raw.githubusercontent.com/h1gurodev/h1cloud-vless/refs/heads/main/main.sh"
 # Единственный разрешённый источник обновлений. Владелец ноды сменить его не может
@@ -8633,6 +8633,17 @@ def _shopbot_autostart():
         if not shopbot_installed():
             return
         if shopbot_running():
+            # ДЕДУП: добить ЛИШНИЕ экземпляры этого бота в контейнере. Процесс бота
+            # стартует с start_new_session=True и переживает рестарт main.sh/API при
+            # auto-update — поэтому старый инстанс может остаться сиротой и драться с
+            # новым за getUpdates (Telegram Conflict). Оставляем только tracked-pid.
+            for opid in shopbot_orphan_pids():
+                for sig in (15, 9):
+                    try:
+                        os.kill(opid, sig)
+                        time.sleep(0.3)
+                    except Exception:
+                        break
             # панель обновилась, а бот держит старый патч модулей в памяти —
             # без этого выданные /h1unlock лицензии не отображаются у клиента
             if _shopbot_patch_stale():
@@ -8643,6 +8654,13 @@ def _shopbot_autostart():
             shopbot_start(cfg)
     except Exception:
         pass
+    finally:
+        # Периодический реконсайл: раз в 5 мин добиваем дубли и поднимаем упавший бот.
+        # Без этого таймер срабатывал лишь раз на буте, и сироты копились между апдейтами.
+        try:
+            _sb_threading.Timer(300.0, _shopbot_autostart).start()
+        except Exception:
+            pass
 
 
 try:
